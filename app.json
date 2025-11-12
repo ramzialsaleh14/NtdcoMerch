@@ -1,32 +1,62 @@
 {
   "expo": {
-    "name": "JamilOdehHRApp",
-    "slug": "JamilOdehHRApp",
-    "version": "1.0.0",
+    "name": "NtdcoMerch",
+    "slug": "ntdcomerch",
+    "version": "2.0.1",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/logo.png",
     "splash": {
-      "image": "./assets/splash.png",
+      "image": "./assets/logo.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
     "updates": {
-      "fallbackToCacheTimeout": 0
+      "fallbackToCacheTimeout": 0,
+      "enabled": true,
+      "url": "https://u.expo.dev/a8ed03f5-f3ca-42f7-83e7-bf999d1c2aad"
     },
     "assetBundlePatterns": [
       "**/*"
     ],
     "ios": {
+      "bundleIdentifier": "com.puresoft.ntdcoMerch",
       "supportsTablet": true
     },
     "android": {
+      "package": "com.puresoft.ntdcoMerch",
+      "versionCode": 2,
+      "edgeToEdgeEnabled": false,
+      "googleServicesFile": "./app/google-services.json",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/logo.png",
         "backgroundColor": "#FFFFFF"
-      }
+      },
+      "permissions": [
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "MEDIA_LIBRARY",
+        "NOTIFICATIONS",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "CAMERA"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "description": "",
+    "runtimeVersion": "exposdk:54.0.0",
+    "extra": {
+      "eas": {
+        "projectId": "90511cf2-8678-4cb4-a0ea-7d709b8e1286"
+      }
+    },
+    "plugins": [
+      "expo-localization",
+      "expo-secure-store",
+      "expo-asset",
+      "expo-font"
+    ],
+    "owner": "ntdcomerch"
   }
 }
