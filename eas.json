@@ -1,4 +1,8 @@
 {
+  "cli": {
+    "appVersionSource": "local",
+    "requireCommit": false
+  },
   "build": {
     "production": {
       "channel": "production",

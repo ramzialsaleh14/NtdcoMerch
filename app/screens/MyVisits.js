@@ -7,8 +7,8 @@ import * as SecureStore from "expo-secure-store";
 import * as Constants from "../utils/Constants";
 import * as Localization from "expo-localization";
 import Color, { White } from 'react-native-material-color';
+import { SafeAreaView } from "react-native-safe-area-context";
 import {
-    SafeAreaView,
     View,
     Image,
     TouchableOpacity,
@@ -249,7 +249,7 @@ export const MyVisitsScreen = ({ navigation }) => {
     }
 
     return (
-        <View>
+        <SafeAreaView>
             <Portal>{!!showDeleteDialog && renderDeleteDialog()}</Portal>
 
             {/* Date Filters */}
@@ -354,7 +354,7 @@ export const MyVisitsScreen = ({ navigation }) => {
                 extraData={filteredVisitsList}
                 renderItem={renderVisitsItem}
             />
-        </View>
+        </SafeAreaView>
     );
 };
 

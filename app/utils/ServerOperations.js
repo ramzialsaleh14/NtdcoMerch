@@ -102,6 +102,7 @@ export const checkLogin = async (userID, password) => {
   params += `action=${Constants.CHECK_LOGIN}`;
   params += `&USER=${userID}`;
   params += `&PASSWORD=${password}`;
+  params += `&APP.VERSION=${Constants.appVersion}`;
 
   /* Send request */
   const response = await pickHttpRequest(params);

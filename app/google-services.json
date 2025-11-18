@@ -1,36 +1,26 @@
 {
   "project_info": {
-    "project_number": "807089270431",
-    "project_id": "ntdcohr",
-    "storage_bucket": "ntdcohr.appspot.com"
+    "project_number": "632211091933",
+    "project_id": "ntdcomerch-8783f",
+    "storage_bucket": "ntdcomerch-8783f.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:807089270431:android:8e2955dbc4dba6ceb63caa",
+        "mobilesdk_app_id": "1:632211091933:android:958d8d594143218cf64634",
         "android_client_info": {
-          "package_name": "com.puresoft.ntdcoHR"
+          "package_name": "com.puresoft.ntdcoMerch"
         }
       },
-      "oauth_client": [
-        {
-          "client_id": "807089270431-hpsdcl2nb2drppo8br5u0j5tflfde0fk.apps.googleusercontent.com",
-          "client_type": 3
-        }
-      ],
+      "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyB3bbAKxFBeL9xsd14Ovn6cxO-4kSydiTQ"
+          "current_key": "AIzaSyACYnx---S_b8zCud3obEDL-xQYxslB7Ls"
         }
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": [
-            {
-              "client_id": "807089270431-8eb4kl2gr78dmbo1ll1k6kr7k0hs6fe0.apps.googleusercontent.com",
-              "client_type": 3
-            }
-          ]
+          "other_platform_oauth_client": []
         }
       }
     }

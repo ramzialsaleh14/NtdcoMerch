@@ -131,4 +131,5 @@ export default {
   incorrectPass: "Incorrect Password",
   restrictedMode: "Restricted Mode: Cannot enter categories",
   restrictedModeMessage: "⚠️ Restricted Mode: You can only end and post this visit. No changes allowed.",
+  loginFailed: "Login failed. Please check your connection and try again.",
 };

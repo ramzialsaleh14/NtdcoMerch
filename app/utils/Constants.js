@@ -4,7 +4,7 @@ export const appColor = "#AB9F87";
 export const darkBlueColor = "#386280";
 export const greenColor = "#6BA561";
 // Urls
-export const appVersion = "v1.0";
+export const appVersion = "v1.0.0";
 export const serverBaseUrl = "http://ntdco.ddns.net";
 //export const serverBaseUrl = "http://192.168.1.231:8080";
 export const serverPublicBaseUrl = "http://ntdco.ddns.net";

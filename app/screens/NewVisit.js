@@ -20,8 +20,8 @@ import {
     MenuTrigger,
     MenuProvider,
 } from "react-native-popup-menu";
+import { SafeAreaView } from "react-native-safe-area-context";
 import {
-    SafeAreaView,
     View,
     Image,
     TouchableOpacity,

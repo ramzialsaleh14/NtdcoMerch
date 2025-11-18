@@ -63,17 +63,24 @@ export const LoginScreen = ({ navigation }) => {
   }, [userNoStorage, passwordStorage]);
 
   const onLoginClick = async () => {
-    const resp = await ServerOperations.checkLogin(userNo, password);
-    if (resp.result === true) {
-      await Commons.saveToAS("userID", userNo);
-      await Commons.saveToAS("password", password);
-      await Commons.saveToAS("isTeamLeader", resp.isTeamLeader ? "true" : "false");
-      if (resp.merchUsers) {
-        await Commons.saveToAS("merchUsers", JSON.stringify(resp.merchUsers));
+    try {
+      const resp = await ServerOperations.checkLogin(userNo, password);
+      if (resp.result === true) {
+        await Commons.saveToAS("userID", userNo);
+        await Commons.saveToAS("password", password);
+        await Commons.saveToAS("isTeamLeader", resp.isTeamLeader ? "true" : "false");
+        if (resp.merchUsers) {
+          await Commons.saveToAS("merchUsers", JSON.stringify(resp.merchUsers));
+        }
+        navigation.navigate("Main", { updateData: resp.updateData });
+      } else {
+        if (resp.msg) {
+          Commons.okAlert("", resp.msg);
+        }
       }
-      navigation.navigate("Main", { updateData: resp.updateData });
-    } else {
-      Commons.okAlert("Wrong username or password");
+    } catch (error) {
+      console.error("Login error:", error);
+      Commons.okAlert(i18n.t("error"), i18n.t("loginFailed"));
     }
   };
 

@@ -181,12 +181,4 @@ dependencies {
     }
 }
 
-// Commented out Google Services - not configured for this package name
-// apply plugin: 'com.google.gms.google-services'
-}
-
-// Commented out Google Services - not configured for this package name
-// apply plugin: 'com.google.gms.google-services'
-}
-
 apply plugin: 'com.google.gms.google-services'
