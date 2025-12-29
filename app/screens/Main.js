@@ -59,12 +59,24 @@ export default function MainScreen({ navigation, route }) {
   const [visitPass, setVisitPass] = useState("");
   const [fitleredCustomersList, setFilteredCustomersList] = useState([]);
   const [customersList, setCustomersList] = useState([]);
+  const [merchCustomersList, setMerchCustomersList] = useState([]);
+  const [filteredMerchCustomersList, setFilteredMerchCustomersList] = useState([]);
   const [filteredMerchUsersList, setFilteredMerchUsersList] = useState([]);
   const [merchUsersList, setMerchUsersList] = useState([]);
   const [curLang, setCurLang] = useState("");
   const [refresh, setRefresh] = useState(false);
   const [custModalType, setCustModalType] = useState("");
   const [isTeamLeader, setIsTeamLeader] = useState(false);
+  const [showEditMerchModal, setShowEditMerchModal] = useState(false);
+  const [showSelectMerchForEditModal, setShowSelectMerchForEditModal] = useState(false);
+  const [selectedMerchForEdit, setSelectedMerchForEdit] = useState("");
+  const [selectedMerchForEditName, setSelectedMerchForEditName] = useState("");
+  const [merchPassword, setMerchPassword] = useState("");
+  const [merchDeviceId, setMerchDeviceId] = useState("");
+  const [merchAssignedCustomers, setMerchAssignedCustomers] = useState([]);
+  const [merchAssignedSearch, setMerchAssignedSearch] = useState("");
+  const [showAddCustomerToMerchModal, setShowAddCustomerToMerchModal] = useState(false);
+  const [filteredAvailableCustomers, setFilteredAvailableCustomers] = useState([]);
 
 
   useEffect(() => {
@@ -100,7 +112,9 @@ export default function MainScreen({ navigation, route }) {
         const user = await Commons.getFromAS("userID");
         if (user) {
           try {
+            setProggressDialogVisible(true);
             const syncResult = await Commons.checkAndSyncVisits(user);
+            setProggressDialogVisible(false);
             if (syncResult.synced) {
               console.log(syncResult.message);
             }
@@ -194,7 +208,17 @@ export default function MainScreen({ navigation, route }) {
             <Text style={{ marginRight: 20, color: "red" }}>
               {item.CODE}
             </Text>
-            <Text>{item.NAME}</Text>
+            <Text
+              style={{
+                flex: 1,
+                color: "#111",
+                textAlign: I18nManager.isRTL ? "right" : "left",
+              }}
+              numberOfLines={2}
+              ellipsizeMode="tail"
+            >
+              {item.NAME && item.NAME.trim() !== "" ? item.NAME : item.CODE}
+            </Text>
           </View>
         </TouchableOpacity>
       </View>
@@ -210,6 +234,27 @@ export default function MainScreen({ navigation, route }) {
             setVisitMerch(item.ID);
             setVisitMerchName(item.NAME);
             setShowSelectMerchUserModal(false);
+
+            // Load customers for this merchandiser
+            if (custModalType === "visitPass") {
+              setProggressDialogVisible(true);
+              try {
+                const merchCustomers = await ServerOperations.getCustomers(item.ID);
+                if (merchCustomers && Array.isArray(merchCustomers)) {
+                  setMerchCustomersList(merchCustomers);
+                  setFilteredMerchCustomersList(merchCustomers);
+                } else {
+                  setMerchCustomersList([]);
+                  setFilteredMerchCustomersList([]);
+                }
+              } catch (error) {
+                console.error('Error loading merchandiser customers:', error);
+                setMerchCustomersList([]);
+                setFilteredMerchCustomersList([]);
+              } finally {
+                setProggressDialogVisible(false);
+              }
+            }
           }}
         >
           <View
@@ -225,7 +270,17 @@ export default function MainScreen({ navigation, route }) {
             <Text style={{ marginRight: 20, color: "red" }}>
               {item.ID}
             </Text>
-            <Text>{item.NAME}</Text>
+            <Text
+              style={{
+                flex: 1,
+                color: "#111",
+                textAlign: I18nManager.isRTL ? "right" : "left",
+              }}
+              numberOfLines={2}
+              ellipsizeMode="tail"
+            >
+              {item.NAME && item.NAME.trim() !== "" ? item.NAME : item.ID}
+            </Text>
           </View>
         </TouchableOpacity>
       </View>
@@ -235,24 +290,43 @@ export default function MainScreen({ navigation, route }) {
 
   const updateData = async () => {
     setProggressDialogVisible(true);
-    const cats = await ServerOperations.getCategories();
-    await Commons.loadCategories(cats);
-    const customers = await ServerOperations.getCustomers();
-    await Commons.loadCustomers(customers);
-    const visitPasses = await ServerOperations.getVisitPasswords();
-    await Commons.loadVisitPasswords(visitPasses);
-    const merchUsers = await ServerOperations.getMerchUsers();
-    await Commons.loadMerchUsers(merchUsers);
-    const tasks = await ServerOperations.getTasks(curUser);
-    const items = await ServerOperations.getCategoryItems();
-    await Commons.loadItems(items)
-    await Commons.loadTasks(tasks);
-    Commons.okAlert(i18n.t("dataUpdated"))
-    setRefresh(!refresh)
-    setProggressDialogVisible(false);
+    try {
+      // Fetch everything first so we only clear local DB if fetch succeeded
+      const [cats, customers, visitPasses, merchUsers, tasks, items] = await Promise.all([
+        ServerOperations.getCategories(),
+        ServerOperations.getCustomers(),
+        ServerOperations.getVisitPasswords(),
+        ServerOperations.getMerchUsers(),
+        ServerOperations.getTasks(curUser),
+        ServerOperations.getCategoryItems(),
+      ]);
+
+      // Clear the local server-synced tables before writing fresh data
+      await Commons.clearServerSyncedData();
+
+      // Load fresh data into local DB
+      await Commons.loadCustomers(customers);
+      await Commons.loadCategories(cats);
+      await Commons.loadVisitPasswords(visitPasses);
+      await Commons.loadMerchUsers(merchUsers);
+      await Commons.loadItems(items);
+      await Commons.loadTasks(tasks);
+
+      Commons.okAlert(i18n.t("dataUpdated"));
+      setRefresh(!refresh);
+    } catch (err) {
+      console.error('updateData failed', err);
+      Commons.okAlert(i18n.t("error"), i18n.t("dataUpdateFailed") || 'Update failed');
+    } finally {
+      setProggressDialogVisible(false);
+    }
   }
 
   const renderSelectCustomerModal = () => {
+    const isVisitPassMode = custModalType === "visitPass";
+    const displayList = isVisitPassMode ? filteredMerchCustomersList : fitleredCustomersList;
+    const sourceList = isVisitPassMode ? merchCustomersList : customersList;
+
     return (
       <Modal
         visible={true}
@@ -268,8 +342,12 @@ export default function MainScreen({ navigation, route }) {
           value={searchText}
           onChangeText={(text) => {
             setSearchText(text);
-            const list = Commons.handleSearch(text, customersList);
-            setFilteredCustomersList(list);
+            const list = Commons.handleSearch(text, sourceList);
+            if (isVisitPassMode) {
+              setFilteredMerchCustomersList(list);
+            } else {
+              setFilteredCustomersList(list);
+            }
           }}
         />
         <Text style={{ textAlign: "center", fontSize: 16, backgroundColor: Constants2.appColor, color: "white", fontWeight: "bold", padding: 10, width: "100%" }}>
@@ -277,12 +355,102 @@ export default function MainScreen({ navigation, route }) {
         </Text>
         <FlatList
           keyExtractor={(item) => item.CODE}
-          data={fitleredCustomersList}
-          extraData={fitleredCustomersList}
+          data={displayList}
+          extraData={displayList}
           renderItem={renderCustItem}
         />
         <Button mode="contained" style={{ borderRadius: 0 }} onPress={async () => {
           setShowSelectCustomerModal(false);
+        }}>
+          <Text style={styles.text}>{i18n.t("back")}</Text>
+        </Button>
+      </Modal>
+    )
+  }
+
+  const renderSelectMerchForEditModal = () => {
+    return (
+      <Modal
+        visible={true}
+        onDismiss={() => {
+          setShowSelectMerchForEditModal(false);
+        }}
+        contentContainerStyle={styles.modalStyle}
+      >
+        <TextInput
+          placeholder={i18n.t("search")}
+          clearButtonMode="always"
+          style={styles.searchBox}
+          value={searchText}
+          onChangeText={(text) => {
+            setSearchText(text);
+            const list = Commons.handleSearch(text, merchUsersList);
+            setFilteredMerchUsersList(list);
+          }}
+        />
+        <Text style={{ textAlign: "center", fontSize: 16, backgroundColor: Constants2.appColor, color: "white", fontWeight: "bold", padding: 10, width: "100%" }}>
+          {i18n.t("users")}
+        </Text>
+        <FlatList
+          keyExtractor={(item) => item.ID}
+          data={filteredMerchUsersList}
+          extraData={filteredMerchUsersList}
+          renderItem={({ item }) => (
+            <View>
+              <TouchableOpacity
+                onPress={async () => {
+                  setSelectedMerchForEdit(item.ID);
+                  setSelectedMerchForEditName(item.NAME);
+                  setShowSelectMerchForEditModal(false);
+                  setProggressDialogVisible(true);
+                  try {
+                    const merchInfo = await ServerOperations.getMerchInfo(item.ID);
+                    if (merchInfo && merchInfo.PASSWORD !== undefined && merchInfo.DEVICE_ID !== undefined) {
+                      setMerchPassword(merchInfo.PASSWORD || "");
+                      setMerchDeviceId(merchInfo.DEVICE_ID || "");
+                      setMerchAssignedCustomers(merchInfo.CUSTOMERS || []);
+                      setShowEditMerchModal(true);
+                    } else {
+                      Commons.okAlert(i18n.t("error"));
+                    }
+                  } catch (error) {
+                    console.error('Error loading merch info:', error);
+                    Commons.okAlert(i18n.t("error"));
+                  } finally {
+                    setProggressDialogVisible(false);
+                  }
+                }}
+              >
+                <View
+                  style={{
+                    flexDirection: "row",
+                    padding: 15,
+                    borderWidth: 0.5,
+                    borderRadius: 5,
+                    marginBottom: 5
+                  }}
+                >
+                  <Text style={{ marginRight: 20, color: "red" }}>
+                    {item.ID}
+                  </Text>
+                  <Text
+                    style={{
+                      flex: 1,
+                      color: "#111",
+                      textAlign: I18nManager.isRTL ? "right" : "left",
+                    }}
+                    numberOfLines={2}
+                    ellipsizeMode="tail"
+                  >
+                    {item.NAME}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            </View>
+          )}
+        />
+        <Button mode="contained" style={{ borderRadius: 0 }} onPress={async () => {
+          setShowSelectMerchForEditModal(false);
         }}>
           <Text style={styles.text}>{i18n.t("back")}</Text>
         </Button>
@@ -327,6 +495,260 @@ export default function MainScreen({ navigation, route }) {
       </Modal>
     )
   }
+  const renderAddCustomerToMerchModal = () => {
+    return (
+      <Modal
+        visible={true}
+        onDismiss={() => {
+          setShowAddCustomerToMerchModal(false);
+        }}
+        contentContainerStyle={styles.modalStyle}
+      >
+        <TextInput
+          placeholder={i18n.t("search")}
+          clearButtonMode="always"
+          style={styles.searchBox}
+          value={searchText}
+          onChangeText={(text) => {
+            setSearchText(text);
+            const list = Commons.handleSearch(text, customersList);
+            setFilteredAvailableCustomers(list);
+          }}
+        />
+        <Text style={{ textAlign: "center", fontSize: 16, backgroundColor: Constants2.appColor, color: "white", fontWeight: "bold", padding: 10, width: "100%" }}>
+          {i18n.t("customers")}
+        </Text>
+        <FlatList
+          keyExtractor={(item) => item.CODE}
+          data={filteredAvailableCustomers}
+          extraData={filteredAvailableCustomers}
+          renderItem={({ item }) => {
+            const isAlreadyAdded = merchAssignedCustomers.some(c => c.CODE === item.CODE);
+            return (
+              <View>
+                <TouchableOpacity
+                  onPress={() => {
+                    if (!isAlreadyAdded) {
+                      setMerchAssignedCustomers(prev => [...prev, { CODE: item.CODE, NAME: item.NAME }]);
+                      setShowAddCustomerToMerchModal(false);
+                    }
+                  }}
+                  disabled={isAlreadyAdded}
+                  style={{ opacity: isAlreadyAdded ? 0.5 : 1 }}
+                >
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      padding: 15,
+                      borderWidth: 0.5,
+                      borderRadius: 5,
+                      marginBottom: 5,
+                      backgroundColor: isAlreadyAdded ? "#f0f0f0" : "white"
+                    }}
+                  >
+                    <Text style={{ marginRight: 20, color: "red" }}>
+                      {item.CODE}
+                    </Text>
+                    <Text
+                      style={{
+                        flex: 1,
+                        color: "#111",
+                        textAlign: I18nManager.isRTL ? "right" : "left",
+                      }}
+                      numberOfLines={2}
+                      ellipsizeMode="tail"
+                    >
+                      {item.NAME && item.NAME.trim() !== "" ? item.NAME : item.CODE}
+                    </Text>
+                    {isAlreadyAdded && (
+                      <Ionicons name="checkmark-circle" size={20} color="green" />
+                    )}
+                  </View>
+                </TouchableOpacity>
+              </View>
+            );
+          }}
+        />
+        <Button mode="contained" style={{ borderRadius: 0 }} onPress={async () => {
+          setShowAddCustomerToMerchModal(false);
+        }}>
+          <Text style={styles.text}>{i18n.t("back")}</Text>
+        </Button>
+      </Modal>
+    )
+  }
+
+  const renderEditMerchModal = () => {
+    const filteredAssignedCustomers = merchAssignedCustomers.filter((cust) => {
+      if (!merchAssignedSearch) return true;
+      const term = merchAssignedSearch.toLowerCase();
+      return (
+        cust.CODE.toLowerCase().includes(term) ||
+        (cust.NAME && cust.NAME.toLowerCase().includes(term))
+      );
+    });
+    return (
+      <Modal
+        visible={true}
+        onDismiss={() => {
+          setShowEditMerchModal(false);
+          setSelectedMerchForEdit("");
+          setSelectedMerchForEditName("");
+          setMerchPassword("");
+          setMerchDeviceId("");
+          setMerchAssignedCustomers([]);
+          setMerchAssignedSearch("");
+        }}
+        contentContainerStyle={{ backgroundColor: "white", height: "90%", flexDirection: "column" }}
+      >
+        <View>
+          <Text style={{ textAlign: "center", fontSize: 16, backgroundColor: Constants2.appColor, color: "white", fontWeight: "bold", padding: 10, width: "100%", marginBottom: 20 }}>
+            {i18n.t("editMerchInfo")}
+          </Text>
+        </View>
+        <ScrollView style={{ flex: 1, paddingHorizontal: 20 }}>
+          <Text style={{ fontSize: 14, color: "#111", marginBottom: 5 }}>
+            {i18n.t("user")}: {selectedMerchForEditName} ({selectedMerchForEdit})
+          </Text>
+          <TextInput
+            label={i18n.t("password")}
+            clearButtonMode="always"
+            style={styles.searchBox}
+            value={merchPassword}
+            onChangeText={setMerchPassword}
+            returnKeyType="done"
+            blurOnSubmit={true}
+          />
+          <View style={{ marginBottom: 10 }}>
+            <Text style={{ fontSize: 14, color: "#666", marginBottom: 5 }}>
+              {i18n.t("deviceId")}:
+            </Text>
+            <View style={{ flexDirection: "row", alignItems: "center" }}>
+              <View style={[styles.searchBox, { flex: 1, marginRight: 10, marginBottom: 0, padding: 15, justifyContent: "center", backgroundColor: "#f5f5f5" }]}>
+                <Text style={{ color: merchDeviceId ? "#111" : "#999", fontSize: 14 }}>
+                  {merchDeviceId || i18n.t("notAvailable")}
+                </Text>
+              </View>
+              <Button
+                mode="contained"
+                style={{ backgroundColor: "red" }}
+                onPress={() => {
+                  Commons.confirmAlert(
+                    i18n.t("confirm"),
+                    i18n.t("clearDeviceIdConfirm"),
+                    () => setMerchDeviceId("")
+                  );
+                }}
+              >
+                <Text style={styles.text}>{i18n.t("clear")}</Text>
+              </Button>
+            </View>
+          </View>
+          <View style={{ marginBottom: 10, flex: 1 }}>
+            <TextInput
+              placeholder={i18n.t("searchCustomer")}
+              clearButtonMode="always"
+              style={[styles.searchBox, { marginBottom: 5 }]}
+              value={merchAssignedSearch}
+              onChangeText={(text) => setMerchAssignedSearch(text)}
+            />
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+              <Text style={{ fontSize: 14, color: "#666" }}>
+                {i18n.t("customers")} ({merchAssignedCustomers.length}):
+              </Text>
+              <Button
+                mode="contained"
+                compact
+                style={{ backgroundColor: Constants2.appColor }}
+                onPress={() => {
+                  setFilteredAvailableCustomers(customersList);
+                  setShowAddCustomerToMerchModal(true);
+                }}
+              >
+                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                  <Ionicons name="add" size={16} color="white" style={{ marginRight: 4 }} />
+                  <Text style={{ color: "white", fontSize: 12 }}>{i18n.t("addCustomer")}</Text>
+                </View>
+              </Button>
+            </View>
+            <ScrollView style={{ maxHeight: 400, borderWidth: 1, borderColor: "#ddd", borderRadius: 5, padding: 5 }}>
+              {filteredAssignedCustomers.length === 0 ? (
+                <Text style={{ color: "#999", textAlign: "center", padding: 10 }}>
+                  {i18n.t("noCustomersAssigned") || "No customers assigned"}
+                </Text>
+              ) : (
+                filteredAssignedCustomers.map((cust, index) => (
+                  <View key={index} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 8, borderBottomWidth: 0.5, borderBottomColor: "#eee" }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: "red", fontSize: 12 }}>{cust.CODE}</Text>
+                      <Text style={{ color: "#111", fontSize: 14 }}>{cust.NAME}</Text>
+                    </View>
+                    <TouchableOpacity
+                      onPress={() => {
+                        Commons.confirmAlert(
+                          i18n.t("confirm"),
+                          i18n.t("areYouSure"),
+                          () => {
+                            setMerchAssignedCustomers(prev => prev.filter((item) => item.CODE !== cust.CODE));
+                          }
+                        );
+                      }}
+                    >
+                      <Ionicons name="trash" size={20} color="red" />
+                    </TouchableOpacity>
+                  </View>
+                ))
+              )}
+            </ScrollView>
+          </View>
+        </ScrollView>
+        <View style={{ flexDirection: "row", padding: 20, paddingTop: 10 }}>
+          <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginRight: 5 }} onPress={async () => {
+            setShowEditMerchModal(false);
+            setSelectedMerchForEdit("");
+            setSelectedMerchForEditName("");
+            setMerchPassword("");
+            setMerchDeviceId("");
+            setMerchAssignedCustomers([]);
+            setMerchAssignedSearch("");
+          }}>
+            <Text style={styles.text}>{i18n.t("back")}</Text>
+          </Button>
+          <Button mode="contained" style={{ borderRadius: 0, flex: 0.5 }} onPress={async () => {
+            if (merchPassword.trim() === "") {
+              Commons.okAlert(i18n.t("emptyFields"));
+              return;
+            }
+            setProggressDialogVisible(true);
+            try {
+              const customerCodes = merchAssignedCustomers.map(c => c.CODE).join("@@");
+              const resp = await ServerOperations.editMerchInfo(selectedMerchForEdit, merchPassword, merchDeviceId, customerCodes);
+              if (resp.res === true || resp.res === "true") {
+                Commons.okAlert(i18n.t("saved"));
+                setShowEditMerchModal(false);
+                setSelectedMerchForEdit("");
+                setSelectedMerchForEditName("");
+                setMerchPassword("");
+                setMerchDeviceId("");
+                setMerchAssignedCustomers([]);
+                setMerchAssignedSearch("");
+              } else {
+                Commons.okAlert(i18n.t("notSent"));
+              }
+            } catch (error) {
+              console.error('Error saving merch info:', error);
+              Commons.okAlert(i18n.t("error"));
+            } finally {
+              setProggressDialogVisible(false);
+            }
+          }}>
+            <Text style={styles.text}>{i18n.t("saveChanges")}</Text>
+          </Button>
+        </View>
+      </Modal>
+    )
+  }
+
   const renderPasswordModal = () => {
     return (
       <Modal
@@ -338,6 +760,8 @@ export default function MainScreen({ navigation, route }) {
           setVisitMerch("");
           setVisitMerchName("");
           setVisitPass("");
+          setMerchCustomersList([]);
+          setFilteredMerchCustomersList([]);
         }}
         contentContainerStyle={{ backgroundColor: "white", padding: 20 }}
       >
@@ -346,12 +770,32 @@ export default function MainScreen({ navigation, route }) {
         </Text>
         <TouchableOpacity onPress={() => {
           setCustModalType("visitPass");
-          setShowSelectCustomerModal(true);
+          setShowSelectMerchUserModal(true);
         }}>
+          <TextInput
+            placeholder={i18n.t("user")}
+            clearButtonMode="always"
+            style={styles.searchBox}
+            value={visitMerchName}
+            editable={false}
+            pointerEvents="none"
+          />
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => {
+            if (visitMerch === "") {
+              Commons.okAlert(i18n.t("pleaseSelectMerchFirst") || "Please select a merchandiser first");
+              return;
+            }
+            setCustModalType("visitPass");
+            setShowSelectCustomerModal(true);
+          }}
+          disabled={visitMerch === ""}
+        >
           <TextInput
             placeholder={i18n.t("customer")}
             clearButtonMode="always"
-            style={styles.searchBox}
+            style={[styles.searchBox, visitMerch === "" && { opacity: 0.5 }]}
             value={visitCustomerName}
             editable={false}
             pointerEvents="none"
@@ -360,7 +804,7 @@ export default function MainScreen({ navigation, route }) {
         <TouchableOpacity onPress={() => {
           setCustModalType("visitPass");
           setShowSelectMerchUserModal(true);
-        }}>
+        }} style={{ display: "none" }}>
           <TextInput
             placeholder={i18n.t("user")}
             clearButtonMode="always"
@@ -387,6 +831,8 @@ export default function MainScreen({ navigation, route }) {
             setVisitMerch("");
             setVisitMerchName("");
             setVisitPass("");
+            setMerchCustomersList([]);
+            setFilteredMerchCustomersList([]);
           }}>
             <Text style={styles.text}>{i18n.t("back")}</Text>
           </Button>
@@ -404,6 +850,8 @@ export default function MainScreen({ navigation, route }) {
               setVisitMerch("");
               setVisitMerchName("");
               setVisitPass("");
+              setMerchCustomersList([]);
+              setFilteredMerchCustomersList([]);
             } else {
               if (resp.res == "exists") {
                 Commons.okAlert(i18n.t("exists"));
@@ -422,9 +870,12 @@ export default function MainScreen({ navigation, route }) {
   return (
     <SafeAreaView style={styles.view} >
       <Portal>{!!showPasswordModal && renderPasswordModal()}</Portal>
+      <Portal>{!!showEditMerchModal && renderEditMerchModal()}</Portal>
+      <Portal>{!!showAddCustomerToMerchModal && renderAddCustomerToMerchModal()}</Portal>
+      <Portal>{!!showSelectMerchForEditModal && renderSelectMerchForEditModal()}</Portal>
       <Portal>{!!showSelectMerchUserModal && renderSelectMerchUserModal()}</Portal>
       <Portal>{!!showSelectCustomerModal && renderSelectCustomerModal()}</Portal>
-      <ProgressDialog visible={progressDialogVisible} />
+      <ProgressDialog visible={progressDialogVisible} label={i18n.t("loading")} />
       {/* <Image style={styles.image} source={require("../../assets/logo.png")} /> */}
       <ScrollView contentContainerStyle={styles.container}>
         <TouchableOpacity
@@ -465,9 +916,22 @@ export default function MainScreen({ navigation, route }) {
             </Text>
           </TouchableOpacity>
         )}
+        {isTeamLeader && (
+          <TouchableOpacity
+            onPress={async () => {
+              setShowSelectMerchForEditModal(true)
+            }}
+            style={styles.appButtonContainer(curLang)}
+          >
+            <Ionicons name="person-circle" style={{ marginHorizontal: 12 }} size={26} color={Constants2.appColor} />
+            <Text style={styles.appButtonText}>
+              {i18n.t("editMerchInfo")}
+            </Text>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           onPress={async () => {
-            updateData()
+            await updateData()
           }}
           style={styles.appButtonContainer(curLang)}
         >
@@ -565,7 +1029,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 8,
     marginBottom: 10,
-    textAlign: "center"
+    textAlign: "center",
+    color: "#111111"
   },
   dateTimeTexts: {
     fontSize: 18,
@@ -573,6 +1038,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     textAlign: "center",
+    color: "#111111"
   },
   dateTimeButtons: {
     borderColor: "rgb(1,135,134)",
@@ -609,7 +1075,9 @@ const styles = StyleSheet.create({
     minHeight: height - height / 10
   },
   appButtonText: {
-    fontSize: 18, marginHorizontal: 4
+    fontSize: 18,
+    marginHorizontal: 4,
+    color: "#111111"
   },
   appButton: {
     margin: 20,

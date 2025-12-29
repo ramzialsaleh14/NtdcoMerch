@@ -21,8 +21,48 @@ import * as Constants from "./Constants";
 //import { STRINGS } from "./Strings";
 import * as Localization from "expo-localization";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+
+// local filename -> original URI mapping (persisted) helper keys
+const LOCALMAP_PREFIX = 'LOCALFILE:';
+
+export const saveLocalFileMapping = async (filename, uri) => {
+  try {
+    await AsyncStorage.setItem(LOCALMAP_PREFIX + filename, uri);
+  } catch (e) {
+    console.error('saveLocalFileMapping failed', e);
+  }
+};
+
+export const getLocalFileMapping = async (filename) => {
+  try {
+    return await AsyncStorage.getItem(LOCALMAP_PREFIX + filename);
+  } catch (e) {
+    console.error('getLocalFileMapping failed', e);
+    return null;
+  }
+};
+
+export const removeLocalFileMapping = async (filename) => {
+  try {
+    await AsyncStorage.removeItem(LOCALMAP_PREFIX + filename);
+  } catch (e) {
+    console.error('removeLocalFileMapping failed', e);
+  }
+};
 import * as SQLite from "expo-sqlite";
 import * as ServerOperations from "./ServerOperations";
+const _attachmentsBase = Constants.serverAttachmentsBaseUrl ? Constants.serverAttachmentsBaseUrl.replace(/\/$/, '') : '';
+
+// Normalize an incoming attachment value (filename or full url) into a server URL.
+const normalizeAttachmentValue = (val) => {
+  if (!val) return '';
+  if (typeof val !== 'string') return '';
+  val = val.trim();
+  if (val === '') return '';
+  if (val.startsWith('http://') || val.startsWith('https://')) return val;
+  // plain filename -> return absolute server url
+  return _attachmentsBase + '/' + val.replace(/^\/+/, '');
+};
 // export const getPath = (uri: string) => {
 //   if (uri.startsWith("content://")) {
 //     return RNFetchBlob.fs.stat(uri).then((info) => info?.path);
@@ -203,9 +243,21 @@ export const createDB = async () => {
 export const loadCustomers = async (customers) => {
   const db = await SQLite.openDatabaseAsync("merch.db", { useNewConnection: true });
   let qlist = ["delete from CUSTOMERS where LOCATION IS NULL OR TRIM(LOCATION) = '' "];
+  // Accept multiple server key variations (CODE/code, NAME/name, CUSTOMER/customer) and
+  // sanitize single quotes to avoid SQL injection/paste errors in the generated SQL.
   customers.map((line) => {
+    const code = (line.CODE || line.code || line.Code || "").toString().replace(/'/g, "''");
+    const name = (line.NAME || line.name || line.Customer || line.CUSTOMER || line.CUSTOMER_NAME || "").toString().replace(/'/g, "''");
+    const location = (line.LOCATION || line.location || "").toString().replace(/'/g, "''");
+
+    // If name is empty we still insert a record but leave it blank and log a debug line so
+    // we can detect why names are missing (server vs parsing). This avoids blank rows in UI.
+    if (!name || name.trim() === "") {
+      console.log(`loadCustomers: empty name for code=${code}`);
+    }
+
     qlist.push(
-      `insert into CUSTOMERS(CODE,NAME,LOCATION) values('${line.CODE}','${line.NAME}','${line.LOCATION}') ON CONFLICT(CODE) DO UPDATE SET NAME='${line.NAME}', LOCATION='${line.LOCATION}' WHERE CODE='${line.CODE}'`
+      `insert into CUSTOMERS(CODE,NAME,LOCATION) values('${code}','${name}','${location}') ON CONFLICT(CODE) DO UPDATE SET NAME='${name}', LOCATION='${location}' WHERE CODE='${code}'`
     );
   });
   await db.execAsync(qlist.join(";"));
@@ -261,6 +313,19 @@ export const loadItems = async (items) => {
       `insert into ITEMS(ID,DESC,CATEGORY,TASK) values('${line.ID}','${line.DESC}','${line.CATEGORY}','${line.TASK}') ON CONFLICT(ID,CATEGORY,TASK) DO UPDATE SET DESC='${line.DESC}'`
     );
   });
+  await db.execAsync(qlist.join(";"));
+};
+// Clear server-synced master tables before full refresh
+export const clearServerSyncedData = async () => {
+  const db = await SQLite.openDatabaseAsync("merch.db", { useNewConnection: true });
+  const qlist = [
+    "delete from CATEGORIES",
+    "delete from TASKS",
+    "delete from ITEMS",
+    "delete from CUSTOMERS",
+    "delete from MERCH_USERS",
+    "delete from MERCH_PASSWORDS",
+  ];
   await db.execAsync(qlist.join(";"));
 };
 export const addItemsToVisit = async (items, task) => {
@@ -361,9 +426,21 @@ export const checkAndSyncVisits = async (user) => {
     console.log(`Server last seq: ${serverLastSeq}, Local last seq: ${localLastSeq}`);
 
     // If server has higher sequence, sync visits
-    if (serverLastSeq > localLastSeq) {
+    if (serverLastSeq > localLastSeq || localLastSeq === 0 || serverResponse.FORCE_UPDATE || isNaN(localLastSeq)) {
       console.log('Server has newer visits, syncing...');
-
+      const cats = await ServerOperations.getCategories();
+      await loadCategories(cats);
+      const customers = await ServerOperations.getCustomers();
+      await loadCustomers(customers);
+      const visitPasses = await ServerOperations.getVisitPasswords();
+      await loadVisitPasswords(visitPasses);
+      const merchUsers = await ServerOperations.getMerchUsers();
+      await loadMerchUsers(merchUsers);
+      const tasks = await ServerOperations.getTasks(user);
+      const items = await ServerOperations.getCategoryItems();
+      await loadItems(items)
+      await loadTasks(tasks);
+      //   okAlert(i18n.t("dataUpdated"))
       const visitsResponse = await ServerOperations.getUserVisitsJson(user);
 
       if (visitsResponse && Array.isArray(visitsResponse) && visitsResponse.length > 0) {
@@ -839,179 +916,391 @@ export const getVisitDataForPost = async (visitID) => {
           IMAGES_AFTER: '',
           FLYER_ATTACHMENT: '',
           OFFSHELF_ATTACHMENT: '',
-          ITEMS: []
+          ITEMS: [],
+          TASKS: [] // will collect { TASK_ID, TASK_TIME } entries
         });
       }
 
       const categoryData = categoryMap.get(categoryId);
 
-      // Accumulate task-level data with separate attachment types
-      if (task.IMAGES_BEFORE) categoryData.IMAGES_BEFORE = task.IMAGES_BEFORE;
-      if (task.IMAGES_AFTER) categoryData.IMAGES_AFTER = task.IMAGES_AFTER;
-
-      // Separate attachments by task type - use dedicated columns
-      if (task.FLYER_ATTACHMENT) {
-        categoryData.FLYER_ATTACHMENT = task.FLYER_ATTACHMENT;
-      }
-      if (task.OFFSHELF_ATTACHMENT) {
-        categoryData.OFFSHELF_ATTACHMENT = task.OFFSHELF_ATTACHMENT;
+      // Create or find the per-task entry inside the category
+      let taskEntry = categoryData.TASKS.find(t => t.TASK_ID === task.ID);
+      if (!taskEntry) {
+        taskEntry = {
+          TASK_ID: task.ID,
+          DESC: task.DESC || '',
+          TYPE: task.TYPE || '',
+          TASK_TIME: timeSpent,
+          IMAGES_BEFORE: task.IMAGES_BEFORE || '',
+          IMAGES_AFTER: task.IMAGES_AFTER || '',
+          FLYER_ATTACHMENT: task.FLYER_ATTACHMENT || '',
+          OFFSHELF_ATTACHMENT: task.OFFSHELF_ATTACHMENT || '',
+          ITEMS: [],
+          IS_OPTIONAL: task.IS_OPTIONAL || ''
+        };
+        categoryData.TASKS.push(taskEntry);
+      } else {
+        // update task time if found (multiple tasks may map to same ID across iterations)
+        taskEntry.TASK_TIME = taskTimeSpent;
+        taskEntry.IMAGES_BEFORE = task.IMAGES_BEFORE || taskEntry.IMAGES_BEFORE;
+        taskEntry.IMAGES_AFTER = task.IMAGES_AFTER || taskEntry.IMAGES_AFTER;
+        taskEntry.FLYER_ATTACHMENT = task.FLYER_ATTACHMENT || taskEntry.FLYER_ATTACHMENT;
+        taskEntry.OFFSHELF_ATTACHMENT = task.OFFSHELF_ATTACHMENT || taskEntry.OFFSHELF_ATTACHMENT;
       }
 
       // Get the task time that was already stored in taskTimeMap
       const taskTimeSpent = taskTimeMap.get(taskKey) || 0;
 
-      // Get items for this task and category
-      const itemsQuery = `SELECT * FROM VISIT_ITEMS WHERE CATEGORY = '${categoryId}' AND TASK = '${task.ID}' AND VISIT_ID = '${visitID}'`;
-      const items = await db.getAllAsync(itemsQuery);
+      // Add a task summary entry to the category's TASKS array (avoid duplicates)
+      const categoryEntry = categoryMap.get(categoryId);
+      if (categoryEntry) {
+        const exists = categoryEntry.TASKS.some(t => t.TASK_ID === task.ID);
+        if (!exists) categoryEntry.TASKS.push({ TASK_ID: task.ID, TASK_TIME: taskTimeSpent });
+      }
 
-      for (const item of items) {
+      // Build a complete items list for this task: include base ITEMS (all items) and overlay any VISIT_ITEMS (filled values)
+      const visitItemsQuery = `SELECT * FROM VISIT_ITEMS WHERE CATEGORY = '${categoryId}' AND TASK = '${task.ID}' AND VISIT_ID = '${visitID}'`;
+      const visitItems = await db.getAllAsync(visitItemsQuery);
+      const visitItemsMap = new Map();
+      visitItems.forEach(it => visitItemsMap.set(it.ID, it));
+
+      const baseItemsQuery = `SELECT * FROM ITEMS WHERE CATEGORY = '${categoryId}' AND TASK = '${task.ID}'`;
+      const baseItems = await db.getAllAsync(baseItemsQuery);
+
+      // First add all base items (these represent 'all items in each task' — even if not filled)
+      for (const base of baseItems) {
+        const v = visitItemsMap.get(base.ID);
         const itemData = {
-          ID: item.ID,
+          ID: base.ID,
           TASK_ID: task.ID,
           TASK_TIME: taskTimeSpent,
-          ALL_FACES: item.ALL_FACES || '',
-          COMPANY_FACES: item.COMPANY_FACES || '',
-          SELLING_PRICE: item.SELLING_PRICE || '',
-          COMP_PROD_LIST: item.COMP_PROD_LIST || '',
-          EXPIRY_LIST: item.EXPIRY_LIST || '',
-          ITEM_AVAILABLE: item.ITEM_AVAILABLE === 'available' ? 'Y' : item.ITEM_AVAILABLE === 'notAvailable' ? 'N' : ''
+          ALL_FACES: v ? (v.ALL_FACES || '') : '',
+          COMPANY_FACES: v ? (v.COMPANY_FACES || '') : '',
+          SELLING_PRICE: v ? (v.SELLING_PRICE || '') : '',
+          COMP_PROD_LIST: v ? (v.COMP_PROD_LIST || '') : '',
+          EXPIRY_LIST: v ? (v.EXPIRY_LIST || '') : '',
+          ITEM_AVAILABLE: v ? (v.ITEM_AVAILABLE === 'available' ? 'Y' : v.ITEM_AVAILABLE === 'notAvailable' ? 'N' : '') : ''
         };
 
-        // Add pricing attachment from dedicated column
-        if (item.PRICING_ATTACHMENT) {
-          itemData.PRICING_ATTACHMENT = item.PRICING_ATTACHMENT;
-        }
+        if (v && v.PRICING_ATTACHMENT) itemData.PRICING_ATTACHMENT = v.PRICING_ATTACHMENT;
 
-        categoryData.ITEMS.push(itemData);
+        taskEntry.ITEMS.push(itemData);
+        // mark as consumed
+        if (v) visitItemsMap.delete(base.ID);
+      }
+
+      // Add any visit_items that are not in base ITEMS (custom/extra filled items)
+      for (const extra of visitItems) {
+        if (!visitItemsMap.has(extra.ID) && baseItems.some(b => b.ID === extra.ID)) continue; // already processed
+        if (visitItemsMap.has(extra.ID)) {
+          const item = visitItemsMap.get(extra.ID);
+          const itemData = {
+            ID: item.ID,
+            TASK_ID: task.ID,
+            TASK_TIME: taskTimeSpent,
+            ALL_FACES: item.ALL_FACES || '',
+            COMPANY_FACES: item.COMPANY_FACES || '',
+            SELLING_PRICE: item.SELLING_PRICE || '',
+            COMP_PROD_LIST: item.COMP_PROD_LIST || '',
+            EXPIRY_LIST: item.EXPIRY_LIST || '',
+            ITEM_AVAILABLE: item.ITEM_AVAILABLE === 'available' ? 'Y' : item.ITEM_AVAILABLE === 'notAvailable' ? 'N' : ''
+          };
+          if (item.PRICING_ATTACHMENT) itemData.PRICING_ATTACHMENT = item.PRICING_ATTACHMENT;
+          taskEntry.ITEMS.push(itemData);
+          visitItemsMap.delete(item.ID);
+        }
       }
     }
   }
 
-  // Helper function to upload images but keep URIs in data
+  // Helper function to upload images and return server URLs
+  // Tolerant parser for upload response: JSON, text, or fallback to sent filename
+  const tolerantExtractFilenameFromResponse = async (response, fallbackFilename) => {
+    // response might be an error sentinel
+    if (!response || response === Constants.networkError_code) {
+      return { filename: fallbackFilename, ok: false };
+    }
+
+    // Try parsing JSON first (many servers return JSON payload with filename)
+    if (typeof response.json === 'function') {
+      try {
+        const json = await response.json();
+        if (json) {
+          // If the JSON is a string, use it (may be a filename)
+          if (typeof json === 'string') {
+            // try to extract a filename-like token
+            const m = json.match(/([A-Za-z0-9_\-]+\.[A-Za-z0-9]{1,6})/);
+            return { filename: m ? m[1] : json.trim(), ok: !!response.ok };
+          }
+
+          // If JSON is an array, try to extract from first element
+          if (Array.isArray(json) && json.length > 0) {
+            const first = json[0];
+            if (typeof first === 'string') return { filename: first.trim(), ok: !!response.ok };
+            if (typeof first === 'object') {
+              const found = first.filename || first.fileName || first.fname || first.name || first.file || (first.data && (first.data.filename || first.data.name));
+              if (found) return { filename: found, ok: !!response.ok };
+            }
+          }
+
+          // If JSON object, look for common keys
+          if (typeof json === 'object') {
+            const found = json.filename || json.fileName || json.fname || json.name || json.file || (json.data && (json.data.filename || json.data.name));
+            if (found) return { filename: found, ok: !!response.ok };
+          }
+        }
+      } catch (e) {
+        // ignore JSON parsing errors and try text path below
+      }
+    }
+
+    // If JSON didn't yield a filename, try response.text() which may contain a filename or a plain string
+    if (typeof response.text === 'function') {
+      try {
+        const text = await response.text();
+        if (text && text.trim() !== '') {
+          const trimmed = text.trim();
+          const m = trimmed.match(/([A-Za-z0-9_\-]+\.[A-Za-z0-9]{1,6})/);
+          if (m) return { filename: m[1], ok: true };
+          return { filename: trimmed, ok: true };
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // No useful info found — treat as success only if response.ok, otherwise false
+    return { filename: fallbackFilename, ok: !!(response && response.ok) };
+  };
   const uploadImages = async (imageUris) => {
     if (!imageUris || imageUris === '') return '';
 
     const uris = imageUris.split('@@');
 
+    const uploadedUrls = [];
+
     for (const uri of uris) {
+      let uploadUri = uri;
       if (uri && uri.trim() !== '') {
         try {
-          // Skip if it's already just a filename
-          if (!uri.includes('/') && !uri.includes('\\')) {
+          // If it's already a full HTTP/HTTPS URL, treat as uploaded
+          if (uri.startsWith('http://') || uri.startsWith('https://')) {
+            uploadedUrls.push(uri);
             continue;
           }
 
-          // Extract filename from URI or generate new one
-          const uriParts = uri.split('/');
-          const originalName = uriParts[uriParts.length - 1];
-          const timestamp = new Date().getTime();
-          const extension = originalName.substring(originalName.lastIndexOf('.'));
-          const newFilename = timestamp + extension;
+          // If it's a plain filename (no path), check AsyncStorage mapping for original URI
+          let mappingKey = null;
+          if (!uri.includes('/') && !uri.includes('\\')) {
+            const mapped = await getLocalFileMapping(uri);
+            if (!mapped) {
+              // no local mapping => assume it's already on server
+              uploadedUrls.push(_attachmentsBase + '/' + uri);
+              continue;
+            }
+            // local mapping exists — upload from mapped URI
+            uploadUri = mapped;
+            mappingKey = uri;
+          }
 
-          const file = { uri, name: newFilename, type: '*/*' };
-          await ServerOperations.pickUploadHttpRequest(file, 1);
+          // Determine filename to send (if original entry was a plain filename use it, otherwise use the file's basename)
+          const uriParts = uploadUri.split('/');
+          const fileBasename = uriParts[uriParts.length - 1];
+          const sendFilename = (!uri.includes('/') && !uri.includes('\\')) ? uri : fileBasename;
+
+          const file = { uri: uploadUri, name: sendFilename, type: '*/*' };
+          const response = await ServerOperations.pickUploadHttpRequest(file, 1);
+
+          // Determine returned filename from server response if available
+          let savedFilename = sendFilename;
+          let uploadSucceeded = false;
+          try {
+            if (response && response !== Constants.networkError_code) {
+              // tolerant parser: try JSON, then text, then regex; if nothing found fall back to sendFilename
+              const parsed = await tolerantExtractFilenameFromResponse(response, sendFilename);
+              if (parsed && parsed.filename) savedFilename = parsed.filename;
+              uploadSucceeded = !!parsed && !!parsed.ok;
+            }
+          } catch (e) {
+            // Be tolerant: don't crash on parse errors - we'll fall back to sendFilename
+            console.log('Failed to parse upload response:', e);
+          }
+
+          const url = _attachmentsBase + '/' + savedFilename;
+          uploadedUrls.push(url);
+          // If we uploaded a local mapping, remove that mapping so next time it's treated as server-hosted
+          if (mappingKey && uploadSucceeded) {
+            // only remove mapping if upload definitely succeeded
+            await removeLocalFileMapping(mappingKey);
+          }
         } catch (error) {
           console.error('Error uploading image:', error);
         }
       }
     }
 
-    // Return original URIs, not filenames
-    return imageUris;
+    // Join uploaded server URLs using the same separator and return
+    return uploadedUrls.join('@@');
   };
 
-  // Helper function to upload single attachment but keep URI in data
+  // Helper function to upload single attachment and return server URL
   const uploadAttachment = async (fileUri) => {
     if (!fileUri || fileUri === '') return '';
 
     try {
-      // Skip if it's already just a filename
-      if (!fileUri.includes('/') && !fileUri.includes('\\')) {
+      // If it's already a full HTTP/HTTPS URL, return it
+      if (fileUri.startsWith('http://') || fileUri.startsWith('https://')) {
         return fileUri;
       }
 
-      // Extract filename from URI or generate new one
-      const uriParts = fileUri.split('/');
-      const originalName = uriParts[uriParts.length - 1];
-      const timestamp = new Date().getTime();
-      const extension = originalName.substring(originalName.lastIndexOf('.'));
-      const newFilename = timestamp + extension;
+      // If it's a plain filename (no path), check for local copy; otherwise assume it's on server
+      let uploadUri = fileUri;
+      let mappingKey = null;
+      if (!fileUri.includes('/') && !fileUri.includes('\\')) {
+        const mapped = await getLocalFileMapping(fileUri);
+        if (!mapped) {
+          return _attachmentsBase + '/' + fileUri;
+        }
+        uploadUri = mapped;
+        mappingKey = fileUri;
+      }
 
-      const file = { uri: fileUri, name: newFilename, type: '*/*' };
-      await ServerOperations.pickUploadHttpRequest(file, 1);
+      // Determine filename to send (use plain filename if provided, else use basename from uploadUri)
+      const uriParts = uploadUri.split('/');
+      const fileBasename = uriParts[uriParts.length - 1];
+      const sendFilename = (!fileUri.includes('/') && !fileUri.includes('\\')) ? fileUri : fileBasename;
+
+      const file = { uri: uploadUri, name: sendFilename, type: '*/*' };
+      const response = await ServerOperations.pickUploadHttpRequest(file, 1);
+
+      // Extract saved filename using tolerant parser, fall back to generated name on error
+      let savedFilename = sendFilename;
+      let uploadSucceeded = false;
+      try {
+        if (response && response !== Constants.networkError_code) {
+          const parsed = await tolerantExtractFilenameFromResponse(response, sendFilename);
+          if (parsed && parsed.filename) savedFilename = parsed.filename;
+          uploadSucceeded = !!parsed && !!parsed.ok;
+        }
+      } catch (e) {
+        console.log('Failed to parse upload response:', e);
+      }
+
+      // remove mapping if upload was successful for a mapped file
+      if (mappingKey && uploadSucceeded) await removeLocalFileMapping(mappingKey);
+      return _attachmentsBase + '/' + savedFilename;
     } catch (error) {
       console.error('Error uploading attachment:', error);
     }
-
-    // Return original URI, not filename
     return fileUri;
   };
 
-  // Upload all images before/after and attachments for each category
+  // Upload per-task images/attachments and then item attachments
   for (const [categoryId, categoryData] of categoryMap.entries()) {
-    if (categoryData.IMAGES_BEFORE) {
-      categoryData.IMAGES_BEFORE = await uploadImages(categoryData.IMAGES_BEFORE);
-    }
-    if (categoryData.IMAGES_AFTER) {
-      categoryData.IMAGES_AFTER = await uploadImages(categoryData.IMAGES_AFTER);
-    }
-    if (categoryData.FLYER_ATTACHMENT) {
-      categoryData.FLYER_ATTACHMENT = await uploadAttachment(categoryData.FLYER_ATTACHMENT);
-    }
-    if (categoryData.OFFSHELF_ATTACHMENT) {
-      categoryData.OFFSHELF_ATTACHMENT = await uploadAttachment(categoryData.OFFSHELF_ATTACHMENT);
-    }
-
-    // Upload item-level attachments
-    for (const item of categoryData.ITEMS) {
-      if (item.PRICING_ATTACHMENT) {
-        item.PRICING_ATTACHMENT = await uploadAttachment(item.PRICING_ATTACHMENT);
+    for (const t of categoryData.TASKS) {
+      if (t.IMAGES_BEFORE) {
+        t.IMAGES_BEFORE = await uploadImages(t.IMAGES_BEFORE);
       }
-      if (item.ATTACHMENT) {
-        item.ATTACHMENT = await uploadAttachment(item.ATTACHMENT);
+      if (t.IMAGES_AFTER) {
+        t.IMAGES_AFTER = await uploadImages(t.IMAGES_AFTER);
+      }
+      if (t.FLYER_ATTACHMENT) {
+        t.FLYER_ATTACHMENT = await uploadAttachment(t.FLYER_ATTACHMENT);
+      }
+      if (t.OFFSHELF_ATTACHMENT) {
+        t.OFFSHELF_ATTACHMENT = await uploadAttachment(t.OFFSHELF_ATTACHMENT);
+      }
+
+      // Upload item-level attachments under this task
+      for (const item of t.ITEMS) {
+        if (item.PRICING_ATTACHMENT) {
+          item.PRICING_ATTACHMENT = await uploadAttachment(item.PRICING_ATTACHMENT);
+        }
+        if (item.ATTACHMENT) {
+          item.ATTACHMENT = await uploadAttachment(item.ATTACHMENT);
+        }
       }
     }
   }
 
-  // Convert map to array and filter out empty categories
-  const categoriesData = Array.from(categoryMap.values())
-    .map(cat => {
-      // Filter out items that have no meaningful data (only ID and TASK_ID)
-      const itemsWithData = cat.ITEMS.filter(item => {
-        return item.ALL_FACES || item.COMPANY_FACES || item.SELLING_PRICE ||
-          item.COMP_PROD_LIST || item.EXPIRY_LIST || item.ITEM_AVAILABLE ||
-          item.PRICING_ATTACHMENT || item.ATTACHMENT;
-      });
+  // Convert map to array and produce tasks-first payload:
+  // tasksData = [ { TASK_ID, TASK_TIME, DESC, TYPE, CAT_ID, CATEGORY_TIME, IMAGES_BEFORE, ... ITEMS } ]
+  const categoriesArray = Array.from(categoryMap.values()).map(cat => {
+    // Build filtered tasks array for final payload
+    const tasksWithData = cat.TASKS.map(task => {
+      // Include ALL items for each task (including unfilled/base items)
+      const itemsAll = (task.ITEMS || []);
 
-      // Calculate total category time from unique task times in items
-      const uniqueTaskTimes = new Map();
-      cat.ITEMS.forEach(item => {
-        if (!uniqueTaskTimes.has(item.TASK_ID)) {
-          uniqueTaskTimes.set(item.TASK_ID, item.TASK_TIME || 0);
-        }
+      // Strip TASK_ID/TASK_TIME from items in final output (task info is already at top-level)
+      const itemsClean = itemsAll.map(it => {
+        const { TASK_ID, TASK_TIME, ...rest } = it;
+        return rest;
       });
-      const totalCategoryTime = Array.from(uniqueTaskTimes.values()).reduce((sum, time) => sum + time, 0);
 
       return {
-        CAT_ID: cat.CAT_ID,
-        IMAGES_BEFORE: cat.IMAGES_BEFORE,
-        IMAGES_AFTER: cat.IMAGES_AFTER,
-        FLYER_ATTACHMENT: cat.FLYER_ATTACHMENT,
-        OFFSHELF_ATTACHMENT: cat.OFFSHELF_ATTACHMENT,
-        CATEGORY_TIME: totalCategoryTime,
-        ITEMS: itemsWithData
+        TASK_ID: task.TASK_ID,
+        TASK_TIME: task.TASK_TIME || 0,
+        DESC: task.DESC || '',
+        TYPE: task.TYPE || '',
+        IMAGES_BEFORE: task.IMAGES_BEFORE || '',
+        IMAGES_AFTER: task.IMAGES_AFTER || '',
+        FLYER_ATTACHMENT: task.FLYER_ATTACHMENT || '',
+        OFFSHELF_ATTACHMENT: task.OFFSHELF_ATTACHMENT || '',
+        IS_OPTIONAL: task.IS_OPTIONAL || '',
+        ITEMS: itemsClean
       };
-    })
-    .filter(cat => {
-      // Only include categories that have images, attachments, or items with data
-      return cat.IMAGES_BEFORE !== '' ||
-        cat.IMAGES_AFTER !== '' ||
-        cat.FLYER_ATTACHMENT !== '' ||
-        cat.OFFSHELF_ATTACHMENT !== '' ||
-        cat.ITEMS.length > 0;
+    }).filter(t => {
+      // Keep tasks that have any meaningful data (items or attachments)
+      return (t.ITEMS && t.ITEMS.length > 0) || t.IMAGES_BEFORE || t.IMAGES_AFTER || t.FLYER_ATTACHMENT || t.OFFSHELF_ATTACHMENT;
     });
 
-  return categoriesData;
+    // Calculate total category time from unique task times in TASKS
+    const uniqueTaskTimes = new Map();
+    cat.TASKS.forEach(task => {
+      if (!uniqueTaskTimes.has(task.TASK_ID)) {
+        uniqueTaskTimes.set(task.TASK_ID, task.TASK_TIME || 0);
+      }
+    });
+    const totalCategoryTime = Array.from(uniqueTaskTimes.values()).reduce((sum, time) => sum + time, 0);
+
+    return {
+      CAT_ID: cat.CAT_ID,
+      CATEGORY_TIME: totalCategoryTime,
+      TASKS: tasksWithData
+    };
+  })
+    .filter(cat => {
+      // Only include categories that have tasks with any data
+      return cat.TASKS && cat.TASKS.length > 0;
+    });
+
+  // Build a flattened tasks-first payload and development-time checks
+  const tasksData = [];
+  for (const cat of categoriesArray) {
+    const catTime = cat.CATEGORY_TIME || 0;
+    if (!cat.TASKS || !Array.isArray(cat.TASKS)) continue;
+    for (const t of cat.TASKS) {
+      const taskObj = Object.assign({}, t, { CAT_ID: cat.CAT_ID, CATEGORY_TIME: catTime });
+      tasksData.push(taskObj);
+    }
+  }
+
+  // Development-time checks (non-blocking) to ensure tasks payload contains expected fields
+  try {
+    tasksData.forEach(t => {
+      if (typeof t.TASK_ID === 'undefined' || typeof t.TASK_TIME === 'undefined') console.warn('Task missing TASK_ID/TASK_TIME', t.TASK_ID, t.CAT_ID);
+      if (t.ITEMS && Array.isArray(t.ITEMS)) {
+        t.ITEMS.forEach(it => {
+          if (!it.ID) console.warn('Item missing ID in task', t.CAT_ID, t.TASK_ID, it);
+        });
+      }
+    });
+  } catch (e) {
+    // keep quiet if checks fail
+  }
+
+  // Return a tasks-first payload
+  return tasksData;
 };
 
 export const loadVisitFromJson = async (visitData) => {
@@ -1028,9 +1317,132 @@ export const loadVisitFromJson = async (visitData) => {
      ON CONFLICT(ID) DO UPDATE SET USER='${USER}',CUSTOMER='${CUSTOMER}',IN_TIME='${IN_TIME}',OUT_TIME='${OUT_TIME}',NOTES='${NOTES || ''}',STATUS='${status}'`;
     await db.execAsync(query);
 
+    // Prepare categories input - support two formats:
+    // 1) legacy: CATEGORIES array in visitData
+    // 2) new: top-level TASKS array in visitData -> group tasks by CAT_ID
+    let categoriesInput = CATEGORIES;
+    if ((!categoriesInput || !Array.isArray(categoriesInput)) && visitData.TASKS && Array.isArray(visitData.TASKS)) {
+      // group tasks into categories
+      const byCat = new Map();
+      for (const t of visitData.TASKS) {
+        const catId = t.CAT_ID || t.CATEGORY || '';
+        if (!byCat.has(catId)) byCat.set(catId, { CATEGORY: catId, TASKS: [] });
+        byCat.get(catId).TASKS.push(t);
+      }
+      categoriesInput = Array.from(byCat.values());
+    }
+
     // Process each category
-    for (const category of CATEGORIES) {
-      const { CATEGORY: catId, PHOTOS_BEFORE, PHOTOS_AFTER, FLYER_ATTACHMENT, OFFSHELF_ATTACHMENT, ITEMS } = category;
+    for (const category of (categoriesInput || [])) {
+      // Support both legacy (CATEGORY) and new (CAT_ID) formats
+      const catId = category.CATEGORY || category.CAT_ID;
+      const PHOTOS_BEFORE = category.PHOTOS_BEFORE || category.IMAGES_BEFORE || '';
+      const PHOTOS_AFTER = category.PHOTOS_AFTER || category.IMAGES_AFTER || '';
+      const FLYER_ATTACHMENT = category.FLYER_ATTACHMENT || '';
+      const OFFSHELF_ATTACHMENT = category.OFFSHELF_ATTACHMENT || '';
+      let ITEMS = category.ITEMS || [];
+      let TASKS = category.TASKS || [];
+
+      // Handle category-level TASK_ID / TASK_TIME / CATEGORY_TIME
+      // If category has a TASK_ID but no TASKS array, synthesize a single task entry
+      const categoryLevelTaskId = category.TASK_ID || category.TASKID || '';
+      const categoryLevelTaskTime = (category.TASK_TIME !== undefined && category.TASK_TIME !== null && category.TASK_TIME !== '') ? category.TASK_TIME : (category.CATEGORY_TIME !== undefined && category.CATEGORY_TIME !== null && category.CATEGORY_TIME !== '' ? category.CATEGORY_TIME : '');
+      if ((!TASKS || TASKS.length === 0) && categoryLevelTaskId) {
+        // Build synthetic task from category-level fields
+        TASKS = [{
+          TASK_ID: categoryLevelTaskId,
+          TASK_TIME: categoryLevelTaskTime || '',
+          DESC: category.DESC || '',
+          TYPE: category.TYPE || '',
+          IMAGES_BEFORE: PHOTOS_BEFORE || '',
+          IMAGES_AFTER: PHOTOS_AFTER || '',
+          FLYER_ATTACHMENT: FLYER_ATTACHMENT || '',
+          OFFSHELF_ATTACHMENT: OFFSHELF_ATTACHMENT || '',
+          ITEMS: ITEMS || [],
+          IS_OPTIONAL: category.IS_OPTIONAL || ''
+        }];
+
+        // items are already attached to the synthetic task's ITEMS — prevent double-processing
+        ITEMS = [];
+      }
+
+      // If new format provides per-task objects, process them first
+      if (TASKS && Array.isArray(TASKS) && TASKS.length > 0) {
+        for (const t of TASKS) {
+          try {
+            const tid = t.TASK_ID || t.ID || t.TASKID || '';
+            const tdesc = t.DESC || '';
+            const ttype = t.TYPE || '';
+            const tIsOptional = t.IS_OPTIONAL || t.is_optional || '';
+
+            const normalizedBefore = t.IMAGES_BEFORE ? (typeof t.IMAGES_BEFORE === 'string' ? t.IMAGES_BEFORE.split('@@').map(normalizeAttachmentValue).filter(Boolean).join('@@') : '') : '';
+            const normalizedAfter = t.IMAGES_AFTER ? (typeof t.IMAGES_AFTER === 'string' ? t.IMAGES_AFTER.split('@@').map(normalizeAttachmentValue).filter(Boolean).join('@@') : '') : '';
+            const normalizedFlyer = t.FLYER_ATTACHMENT ? normalizeAttachmentValue(t.FLYER_ATTACHMENT) : '';
+            const normalizedOffshelf = t.OFFSHELF_ATTACHMENT ? normalizeAttachmentValue(t.OFFSHELF_ATTACHMENT) : '';
+
+            if (tid) {
+              const taskQuery = `INSERT INTO VISIT_TASKS(ID,DESC,TYPE,IMAGES_BEFORE,IMAGES_AFTER,FLYER_ATTACHMENT,OFFSHELF_ATTACHMENT,VISIT_ID,CAT_ID,IS_OPTIONAL) 
+               VALUES ('${tid}','${tdesc}','${ttype}','${normalizedBefore}','${normalizedAfter}','${normalizedFlyer}','${normalizedOffshelf}','${VISIT_ID}','${catId}','${tIsOptional}') 
+               ON CONFLICT(ID,CAT_ID,VISIT_ID) DO UPDATE SET IMAGES_BEFORE='${normalizedBefore}', IMAGES_AFTER='${normalizedAfter}', FLYER_ATTACHMENT='${normalizedFlyer}', OFFSHELF_ATTACHMENT='${normalizedOffshelf}'`;
+              await db.execAsync(taskQuery);
+            }
+
+            // persist TASK_TIME if present
+            if (t.TASK_TIME && t.TASK_TIME !== '' && !isNaN(t.TASK_TIME) && tid) {
+              const timeTrackingQuery = `INSERT INTO VISIT_TIME_TRACKING(VISIT_ID, CATEGORY_ID, TASK_ID, TIME_SPENT) 
+               VALUES('${VISIT_ID}', '${catId}', '${tid}', ${Number(t.TASK_TIME)}) 
+               ON CONFLICT(VISIT_ID, CATEGORY_ID, TASK_ID) 
+               DO UPDATE SET TIME_SPENT = ${Number(t.TASK_TIME)}`;
+              await db.execAsync(timeTrackingQuery);
+            }
+
+            // Process items for this task if present
+            if (t.ITEMS && Array.isArray(t.ITEMS)) {
+              for (const item of t.ITEMS) {
+                const { ID, TASK_ID: itemTaskId, TASK_TIME, ALL_FACES, COMPANY_FACES, SELLING_PRICE, COMP_PROD_LIST, EXPIRY_LIST, ITEM_AVAILABLE, PRICING_ATTACHMENT, ATTACHMENT } = item;
+                const iTaskId = itemTaskId || tid || '';
+                const itemDescQuery = `SELECT DESC FROM ITEMS WHERE ID='${ID}' AND CATEGORY='${catId}' LIMIT 1`;
+                const itemDescs = await db.getAllAsync(itemDescQuery);
+                const itemDesc = itemDescs.length > 0 ? itemDescs[0].DESC : '';
+                const availability = ITEM_AVAILABLE === 'Y' ? 'available' : ITEM_AVAILABLE === 'N' ? 'notAvailable' : '';
+                const pricingAttachment = PRICING_ATTACHMENT ? normalizeAttachmentValue(PRICING_ATTACHMENT) : '';
+                const attach = ATTACHMENT ? normalizeAttachmentValue(ATTACHMENT) : '';
+
+                const itemQuery = `INSERT INTO VISIT_ITEMS(ID,DESC,CATEGORY,TASK,ALL_FACES,COMPANY_FACES,SELLING_PRICE,COMP_PROD_LIST,EXPIRY_LIST,VISIT_ID,ITEM_AVAILABLE,PRICING_ATTACHMENT) 
+                 VALUES ('${ID}','${itemDesc}','${catId}','${iTaskId}','${ALL_FACES || ''}','${COMPANY_FACES || ''}','${SELLING_PRICE || ''}','${COMP_PROD_LIST || ''}','${EXPIRY_LIST || ''}','${VISIT_ID}','${availability}','${pricingAttachment}') 
+                 ON CONFLICT(ID,CATEGORY,VISIT_ID) DO UPDATE SET 
+                 TASK='${iTaskId}',
+                 ALL_FACES='${ALL_FACES || ''}',
+                 COMPANY_FACES='${COMPANY_FACES || ''}',
+                 SELLING_PRICE='${SELLING_PRICE || ''}',
+                 COMP_PROD_LIST='${COMP_PROD_LIST || ''}',
+                 EXPIRY_LIST='${EXPIRY_LIST || ''}',
+                 ITEM_AVAILABLE='${availability}',
+                 PRICING_ATTACHMENT='${pricingAttachment}'`;
+                await db.execAsync(itemQuery);
+
+                // Save task time tracking: prefer item-level TASK_TIME if present; otherwise fall back to parent task time
+                let timeToSave = null;
+                if (TASK_TIME !== undefined && TASK_TIME !== null && TASK_TIME !== '' && !isNaN(TASK_TIME)) {
+                  timeToSave = Number(TASK_TIME);
+                } else if (t && t.TASK_TIME !== undefined && t.TASK_TIME !== null && t.TASK_TIME !== '' && !isNaN(t.TASK_TIME)) {
+                  timeToSave = Number(t.TASK_TIME);
+                }
+
+                if (timeToSave !== null && iTaskId) {
+                  const timeTrackingQuery = `INSERT INTO VISIT_TIME_TRACKING(VISIT_ID, CATEGORY_ID, TASK_ID, TIME_SPENT) 
+                   VALUES('${VISIT_ID}', '${catId}', '${iTaskId}', ${timeToSave}) 
+                   ON CONFLICT(VISIT_ID, CATEGORY_ID, TASK_ID) 
+                   DO UPDATE SET TIME_SPENT = ${timeToSave}`;
+                  await db.execAsync(timeTrackingQuery);
+                }
+              }
+            }
+          } catch (e) {
+            // ignore malformed task entries
+          }
+        }
+      }
 
       // Find tasks related to this category's data
       // Photos task
@@ -1039,9 +1451,11 @@ export const loadVisitFromJson = async (visitData) => {
         const photosTasks = await db.getAllAsync(photosTaskQuery);
         if (photosTasks.length > 0) {
           const task = photosTasks[0];
+          const normalizedBefore = PHOTOS_BEFORE ? PHOTOS_BEFORE.split('@@').map(normalizeAttachmentValue).filter(Boolean).join('@@') : '';
+          const normalizedAfter = PHOTOS_AFTER ? PHOTOS_AFTER.split('@@').map(normalizeAttachmentValue).filter(Boolean).join('@@') : '';
           const taskQuery = `INSERT INTO VISIT_TASKS(ID,DESC,TYPE,IMAGES_BEFORE,IMAGES_AFTER,VISIT_ID,CAT_ID,IS_OPTIONAL) 
-           VALUES ('${task.ID}','${task.DESC}','${task.TYPE}','${PHOTOS_BEFORE || ''}','${PHOTOS_AFTER || ''}','${VISIT_ID}','${catId}','${task.IS_OPTIONAL || ''}') 
-           ON CONFLICT(ID,CAT_ID,VISIT_ID) DO UPDATE SET IMAGES_BEFORE='${PHOTOS_BEFORE || ''}', IMAGES_AFTER='${PHOTOS_AFTER || ''}'`;
+           VALUES ('${task.ID}','${task.DESC}','${task.TYPE}','${normalizedBefore}','${normalizedAfter}','${VISIT_ID}','${catId}','${task.IS_OPTIONAL || ''}') 
+           ON CONFLICT(ID,CAT_ID,VISIT_ID) DO UPDATE SET IMAGES_BEFORE='${normalizedBefore}', IMAGES_AFTER='${normalizedAfter}'`;
           await db.execAsync(taskQuery);
         }
       }
@@ -1052,9 +1466,10 @@ export const loadVisitFromJson = async (visitData) => {
         const flyerTasks = await db.getAllAsync(flyerTaskQuery);
         if (flyerTasks.length > 0) {
           const task = flyerTasks[0];
+          const normalizedFlyer = normalizeAttachmentValue(FLYER_ATTACHMENT);
           const taskQuery = `INSERT INTO VISIT_TASKS(ID,DESC,TYPE,FLYER_ATTACHMENT,VISIT_ID,CAT_ID,IS_OPTIONAL) 
-           VALUES ('${task.ID}','${task.DESC}','${task.TYPE}','${FLYER_ATTACHMENT}','${VISIT_ID}','${catId}','${task.IS_OPTIONAL || ''}') 
-           ON CONFLICT(ID,CAT_ID,VISIT_ID) DO UPDATE SET FLYER_ATTACHMENT='${FLYER_ATTACHMENT}'`;
+           VALUES ('${task.ID}','${task.DESC}','${task.TYPE}','${normalizedFlyer}','${VISIT_ID}','${catId}','${task.IS_OPTIONAL || ''}') 
+           ON CONFLICT(ID,CAT_ID,VISIT_ID) DO UPDATE SET FLYER_ATTACHMENT='${normalizedFlyer}'`;
           await db.execAsync(taskQuery);
         }
       }
@@ -1065,9 +1480,10 @@ export const loadVisitFromJson = async (visitData) => {
         const offshelfTasks = await db.getAllAsync(offshelfTaskQuery);
         if (offshelfTasks.length > 0) {
           const task = offshelfTasks[0];
+          const normalizedOffshelf = normalizeAttachmentValue(OFFSHELF_ATTACHMENT);
           const taskQuery = `INSERT INTO VISIT_TASKS(ID,DESC,TYPE,OFFSHELF_ATTACHMENT,VISIT_ID,CAT_ID,IS_OPTIONAL) 
-           VALUES ('${task.ID}','${task.DESC}','${task.TYPE}','${OFFSHELF_ATTACHMENT}','${VISIT_ID}','${catId}','${task.IS_OPTIONAL || ''}') 
-           ON CONFLICT(ID,CAT_ID,VISIT_ID) DO UPDATE SET OFFSHELF_ATTACHMENT='${OFFSHELF_ATTACHMENT}'`;
+           VALUES ('${task.ID}','${task.DESC}','${task.TYPE}','${normalizedOffshelf}','${VISIT_ID}','${catId}','${task.IS_OPTIONAL || ''}') 
+           ON CONFLICT(ID,CAT_ID,VISIT_ID) DO UPDATE SET OFFSHELF_ATTACHMENT='${normalizedOffshelf}'`;
           await db.execAsync(taskQuery);
         }
       }
@@ -1075,6 +1491,9 @@ export const loadVisitFromJson = async (visitData) => {
       // Process items
       for (const item of ITEMS) {
         const { ID, TASK_ID, TASK_TIME, ALL_FACES, COMPANY_FACES, SELLING_PRICE, COMP_PROD_LIST, EXPIRY_LIST, ITEM_AVAILABLE, PRICING_ATTACHMENT } = item;
+
+        // Items may omit TASK_ID - fall back to category-level TASK_ID if present
+        const assignedTaskId = TASK_ID || categoryLevelTaskId || '';
 
         // Get item description from base ITEMS table
         const itemDescQuery = `SELECT DESC FROM ITEMS WHERE ID='${ID}' AND CATEGORY='${catId}' LIMIT 1`;
@@ -1084,12 +1503,12 @@ export const loadVisitFromJson = async (visitData) => {
         // Convert Y/N back to available/notAvailable
         const availability = ITEM_AVAILABLE === 'Y' ? 'available' : ITEM_AVAILABLE === 'N' ? 'notAvailable' : '';
 
-        const pricingAttachment = PRICING_ATTACHMENT || '';
+        const pricingAttachment = PRICING_ATTACHMENT ? normalizeAttachmentValue(PRICING_ATTACHMENT) : '';
 
         const itemQuery = `INSERT INTO VISIT_ITEMS(ID,DESC,CATEGORY,TASK,ALL_FACES,COMPANY_FACES,SELLING_PRICE,COMP_PROD_LIST,EXPIRY_LIST,VISIT_ID,ITEM_AVAILABLE,PRICING_ATTACHMENT) 
-         VALUES ('${ID}','${itemDesc}','${catId}','${TASK_ID}','${ALL_FACES || ''}','${COMPANY_FACES || ''}','${SELLING_PRICE || ''}','${COMP_PROD_LIST || ''}','${EXPIRY_LIST || ''}','${VISIT_ID}','${availability}','${pricingAttachment}') 
+         VALUES ('${ID}','${itemDesc}','${catId}','${assignedTaskId}','${ALL_FACES || ''}','${COMPANY_FACES || ''}','${SELLING_PRICE || ''}','${COMP_PROD_LIST || ''}','${EXPIRY_LIST || ''}','${VISIT_ID}','${availability}','${pricingAttachment}') 
          ON CONFLICT(ID,CATEGORY,VISIT_ID) DO UPDATE SET 
-         TASK='${TASK_ID}',
+         TASK='${assignedTaskId}',
          ALL_FACES='${ALL_FACES || ''}',
          COMPANY_FACES='${COMPANY_FACES || ''}',
          SELLING_PRICE='${SELLING_PRICE || ''}',
@@ -1099,15 +1518,21 @@ export const loadVisitFromJson = async (visitData) => {
          PRICING_ATTACHMENT='${pricingAttachment}'`;
         await db.execAsync(itemQuery);
 
-        // Save task time tracking if available
-        if (TASK_TIME && TASK_TIME !== '' && !isNaN(TASK_TIME)) {
+        // Save task time tracking if available; prefer item-level TASK_TIME, then category-level task time, then category-level CATEGORY_TIME
+        let assignedTaskTime = null;
+        if (TASK_TIME !== undefined && TASK_TIME !== null && TASK_TIME !== '' && !isNaN(TASK_TIME)) assignedTaskTime = Number(TASK_TIME);
+        else if (categoryLevelTaskTime !== undefined && categoryLevelTaskTime !== null && categoryLevelTaskTime !== '' && !isNaN(categoryLevelTaskTime)) assignedTaskTime = Number(categoryLevelTaskTime);
+
+        if (assignedTaskTime !== null && assignedTaskId) {
           const timeTrackingQuery = `INSERT INTO VISIT_TIME_TRACKING(VISIT_ID, CATEGORY_ID, TASK_ID, TIME_SPENT) 
-           VALUES('${VISIT_ID}', '${catId}', '${TASK_ID}', ${TASK_TIME}) 
+           VALUES('${VISIT_ID}', '${catId}', '${assignedTaskId}', ${assignedTaskTime}) 
            ON CONFLICT(VISIT_ID, CATEGORY_ID, TASK_ID) 
-           DO UPDATE SET TIME_SPENT = ${TASK_TIME}`;
+           DO UPDATE SET TIME_SPENT = ${assignedTaskTime}`;
           await db.execAsync(timeTrackingQuery);
         }
       }
+
+      // (TASKS if present already handled above)
     }
 
     return { success: true };

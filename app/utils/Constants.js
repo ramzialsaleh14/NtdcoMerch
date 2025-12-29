@@ -4,7 +4,7 @@ export const appColor = "#AB9F87";
 export const darkBlueColor = "#386280";
 export const greenColor = "#6BA561";
 // Urls
-export const appVersion = "v1.0.0";
+export const appVersion = "v1.0.9";
 export const serverBaseUrl = "http://ntdco.ddns.net";
 //export const serverBaseUrl = "http://192.168.1.231:8080";
 export const serverPublicBaseUrl = "http://ntdco.ddns.net";
@@ -21,7 +21,7 @@ export const pickPublicServerUrl =
   "&";
 
 export const serverAttachmentsBaseUrl =
-  serverPublicBaseUrl + "/pick/faces/attachments";
+  serverPublicBaseUrl + "/pick/faces/attachments/MerchApp/";
 export const CURRENT_SERVER = "CURRENT_SERVER";
 export const CURRENT_SERVER_IP = "CURRENT_SERVER_IP";
 // User
@@ -48,4 +48,6 @@ export const SAVE_VISIT_PASSWORD = "SAVE.VISIT.PASSWORD";
 export const POST_VISIT = "POST.VISIT";
 export const GET_USER_VISITS_JSON = "GET.USER.VISITS.JSON";
 export const GET_USER_LAST_VISIT_SEQ = "GET.USER.LAST.VISIT.SEQ";
+export const GET_MERCH_INFO = "GET.MERCH.INFO";
+export const EDIT_MERCH_INFO = "EDIT.MERCH.INFO";
 

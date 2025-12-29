@@ -86,7 +86,7 @@ export const LoginScreen = ({ navigation }) => {
 
   return (
     <SafeAreaView style={styles.cardContainer}>
-      <Text style={{ position: "absolute", top: 20, alignSelf: "center" }}>
+      <Text style={{ position: "absolute", top: 80, alignSelf: "center", color: '#111111' }}>
         {Constants.appVersion}
       </Text>
       <View style={styles.viewContainer}>

@@ -73,9 +73,10 @@ export const pickHttpRequest = async (params) => {
     .replace(/٠/g, 0);
   const TIMEOUT = 20000;
   const user = await Commons.getFromAS("userID");
-  const url = Constants.pickServerUrl + params + "&currentuser=" + user;
+  const url = Constants.pickServerUrl;
 
-  console.log(url);
+  console.log("POST request to:", url);
+  console.log("Body params length:", params.length);
 
   const response = await httpTimeout(
     TIMEOUT,
@@ -84,7 +85,7 @@ export const pickHttpRequest = async (params) => {
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: params,
+      body: params + "&currentuser=" + user,
     }).catch((error) => {
       console.error(error);
       return Constants.networkError_code;
@@ -155,10 +156,11 @@ export const getCategoryItems = async () => {
   return null;
 };
 
-export const getCustomers = async () => {
+export const getCustomers = async (user) => {
   /* Request params */
   let params = "";
   params += `action=${Constants.GET_CUSTOMERS}`;
+  params += `&USER=${user}`;
   /* Send request */
   const response = await pickHttpRequest(params);
 
@@ -171,6 +173,47 @@ export const getCustomers = async () => {
   }
 
   return null;
+};
+
+export const getMerchInfo = async (merch) => {
+  /* Request params */
+  let params = "";
+  params += `action=${Constants.GET_MERCH_INFO}`;
+  params += `&MERCH=${merch}`;
+  /* Send request */
+  const response = await pickHttpRequest(params);
+
+  /* Check response */
+  if (response === Constants.networkError_code) {
+    return null;
+  }
+  if (response.ok) {
+    return await response.json();
+  }
+
+  return null;
+};
+
+export const editMerchInfo = async (merch, password, devId, customers) => {
+  /* Request params */
+  let params = "";
+  params += `action=${Constants.EDIT_MERCH_INFO}`;
+  params += `&MERCH=${merch}`;
+  params += `&PASSWORD=${password}`;
+  params += `&DEV_ID=${devId}`;
+  params += `&CUSTOMERS=${customers || ""}`;
+  /* Send request */
+  const response = await pickHttpRequest(params);
+
+  /* Check response */
+  if (response === Constants.networkError_code) {
+    return { res: false };
+  }
+  if (response.ok) {
+    return await response.json();
+  }
+
+  return { res: false };
 };
 export const getVisitPasswords = async () => {
   /* Request params */

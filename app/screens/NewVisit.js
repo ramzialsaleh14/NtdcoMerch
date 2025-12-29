@@ -24,6 +24,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import {
     View,
     Image,
+    ActivityIndicator,
     TouchableOpacity,
     StyleSheet,
     Text,
@@ -128,6 +129,130 @@ export const NewVisitScreen = ({ route, navigation }) => {
     const [flyerAttachment, setFlyerAttachment] = useState("");
 
     let photoArray = [];
+
+    // We'll keep the original URI unchanged and *not* copy files into an app folder.
+    // Generate a filename (numbers+ext), persist a mapping filename -> originalUri so
+    // upload helpers can find the source when sending to the server.
+    const [localAttachmentMap, setLocalAttachmentMap] = useState({});
+
+    const saveLocalFileFromUri = async (uri, suggestedName) => {
+        if (!uri) return null;
+
+        // get extension
+        let extension = '';
+        try {
+            const lastDot = uri.lastIndexOf('.');
+            if (lastDot !== -1) extension = uri.substring(lastDot);
+        } catch (e) {
+            extension = '';
+        }
+
+        const filename = (suggestedName ? suggestedName : new Date().getTime().toString()) + extension;
+
+        try {
+            // Persist mapping for upload time and update in-memory mapping for UI use
+            await Commons.saveLocalFileMapping(filename, uri);
+            setLocalAttachmentMap(prev => ({ ...prev, [filename]: uri }));
+        } catch (e) {
+            console.error('Failed to save local mapping', e);
+            return null;
+        }
+
+        return filename;
+    };
+
+    const setSingleFileWithMapping = async (val) => {
+        setSingleFile(val);
+        if (val && typeof val === 'string' && !val.startsWith('http') && !val.includes('/') && !val.includes('\\')) {
+            try {
+                const mapped = await Commons.getLocalFileMapping(val);
+                if (mapped) setLocalAttachmentMap(prev => ({ ...prev, [val]: mapped }));
+            } catch (e) {
+                console.error('Failed to load mapping for', val, e);
+            }
+        }
+    };
+
+    const setFlyerAttachmentWithMapping = async (val) => {
+        setFlyerAttachment(val);
+        if (val && typeof val === 'string' && !val.startsWith('http') && !val.includes('/') && !val.includes('\\')) {
+            try {
+                const mapped = await Commons.getLocalFileMapping(val);
+                if (mapped) setLocalAttachmentMap(prev => ({ ...prev, [val]: mapped }));
+            } catch (e) {
+                console.error('Failed to load mapping for', val, e);
+            }
+        }
+    };
+
+    const resolveAttachmentUri = (stored) => {
+        if (!stored) return null;
+        if (typeof stored !== 'string') return stored;
+        if (stored.startsWith('http://') || stored.startsWith('https://')) return stored;
+        if (stored.startsWith('file://') || stored.startsWith('content://') || stored.includes('/')) return stored;
+        // Plain filename -> check in-memory map first (local uri for preview), else assume server URL
+        if (localAttachmentMap && localAttachmentMap[stored]) return localAttachmentMap[stored];
+        return Constants.serverAttachmentsBaseUrl.replace(/\/$/, '') + '/' + stored;
+    };
+
+    // Small helper component to show a loading indicator while an image loads.
+    const AttachmentImage = ({ uri, style, imageProps = {}, resizeMode = 'contain' }) => {
+        const [loading, setLoading] = useState(true);
+        const [error, setError] = useState(false);
+        // Track whether the image successfully loaded at least once — prevents link blinking
+        const [loaded, setLoaded] = useState(false);
+
+        if (!uri) return null;
+
+        // Detect remote (server) URLs vs local file/content URIs
+        const isRemote = typeof uri === 'string' && (uri.startsWith('http://') || uri.startsWith('https://'));
+
+        const handleOpenLink = async () => {
+            try {
+                const supported = await Linking.canOpenURL(uri);
+                if (supported) await Linking.openURL(uri);
+            } catch (e) {
+                console.warn('Failed to open url', uri, e);
+            }
+        };
+
+        return (
+            <View style={[{ justifyContent: 'center', alignItems: 'center' }, style]}>
+                <Image
+                    source={{ uri }}
+                    style={[{ width: '100%', height: '100%' }, style]}
+                    resizeMode={resizeMode}
+                    onLoadStart={() => { if (!loaded) { setLoading(true); setError(false); } }}
+                    onLoadEnd={() => { setLoading(false); setLoaded(true); }}
+                    onError={() => { setLoading(false); setError(true); setLoaded(false); }}
+                    {...imageProps}
+                />
+
+                {/* While loading show spinner + (for remote attachments) a clickable link so user can view immediately */}
+                {loading && !loaded && (
+                    <View style={{ position: 'absolute', justifyContent: 'center', alignItems: 'center' }}>
+                        <ActivityIndicator size="large" color={Constants.darkBlueColor} />
+                        {isRemote && !loaded && (
+                            <TouchableOpacity onPress={handleOpenLink} style={{ marginTop: 8 }}>
+                                <Text style={{ color: Constants.darkBlueColor, textDecorationLine: 'underline' }}>{i18n.t('openAttachment') || 'Open attachment'}</Text>
+                            </TouchableOpacity>
+                        )}
+                    </View>
+                )}
+
+                {error && !loaded && (
+                    <View style={{ position: 'absolute', justifyContent: 'center', alignItems: 'center' }}>
+                        <Text style={{ color: 'red' }}>{i18n.t('imageLoadFailed') || 'Image failed to load'}</Text>
+                        {isRemote && !loaded && (
+                            <TouchableOpacity onPress={handleOpenLink} style={{ marginTop: 8 }}>
+                                <Text style={{ color: Constants.darkBlueColor, textDecorationLine: 'underline' }}>{i18n.t('openAttachment') || 'Open attachment'}</Text>
+                            </TouchableOpacity>
+                        )}
+                    </View>
+                )}
+            </View>
+        );
+    };
 
     // Time tracking utility functions
     const formatTime = (seconds) => {
@@ -277,8 +402,9 @@ export const NewVisitScreen = ({ route, navigation }) => {
             result !== "" &&
             !result.cancelled
         ) {
-            // Store the local URI directly without uploading
-            setSingleFile(result.uri);
+            // Save locally with generated name and store the filename
+            const saved = await saveLocalFileFromUri(result.uri);
+            if (saved) setSingleFile(saved);
         }
     };
 
@@ -292,8 +418,9 @@ export const NewVisitScreen = ({ route, navigation }) => {
                 //Setting the state to show single file attributes
                 console.log(res);
                 if (res != "" && res != null && res != undefined) {
-                    // Store the local URI directly without uploading
-                    setSingleFile(res.uri);
+                    // Save locally with generated name and store the filename
+                    const saved = await saveLocalFileFromUri(res.uri, res.name);
+                    if (saved) setSingleFile(saved);
                 }
             } catch (err) {
             }
@@ -366,10 +493,12 @@ export const NewVisitScreen = ({ route, navigation }) => {
             const result = await ImagePicker.launchCameraAsync({
                 mediaTypes: ImagePicker.MediaTypeOptions.Images,
                 quality: 1,
+                exif: true,
             });
 
             if (!result.cancelled && result.assets && result.assets.length > 0) {
-                setPhotos((prevPhotos) => [...prevPhotos, result.assets[0].uri]);
+                const saved = await saveLocalFileFromUri(result.assets[0].uri);
+                if (saved) setPhotos((prevPhotos) => [...prevPhotos, saved]);
 
             } else {
                 console.log('User cancelled taking a photo.');
@@ -411,14 +540,14 @@ export const NewVisitScreen = ({ route, navigation }) => {
             if (item.TYPE == "Flyer") {
                 const attachment = await Commons.getFlyerAttachment(selectedCategory.ID, item.ID);
                 if (attachment.length > 0) {
-                    setFlyerAttachment(attachment[0].FLYER_ATTACHMENT);
+                    await setFlyerAttachmentWithMapping(attachment[0].FLYER_ATTACHMENT);
                 } else {
                     setFlyerAttachment("");
                 }
             } else if (item.TYPE == "Offshelf") {
                 const attachment = await Commons.getOffshelfAttachment(selectedCategory.ID, item.ID);
                 if (attachment.length > 0) {
-                    setFlyerAttachment(attachment[0].OFFSHELF_ATTACHMENT);
+                    await setFlyerAttachmentWithMapping(attachment[0].OFFSHELF_ATTACHMENT);
                 } else {
                     setFlyerAttachment("");
                 }
@@ -451,11 +580,12 @@ export const NewVisitScreen = ({ route, navigation }) => {
         if (camera) {
             setProggressDialogVisible(true);
             setProgressDialogMessage(i18n.t("takingPicture"));
-            const res = await camera.takePictureAsync({ quality: 0 });
+            const res = await camera.takePictureAsync({ quality: 1, skipProcessing: true, exif: true });
             if (res !== undefined && res !== null && res !== "") {
-                // Store the local URI directly without uploading
+                // Save locally with generated name and store the filename
                 const uri = res.uri;
-                setSingleFile(uri);
+                const saved = await saveLocalFileFromUri(uri);
+                if (saved) setSingleFile(saved);
                 setShowCaptureModalPricing(false);
                 setProggressDialogVisible(false);
             }
@@ -467,11 +597,12 @@ export const NewVisitScreen = ({ route, navigation }) => {
         if (camera) {
             setProggressDialogVisible(true);
             setProgressDialogMessage(i18n.t("takingPicture"));
-            const res = await camera.takePictureAsync({ quality: 0 });
+            const res = await camera.takePictureAsync({ quality: 1, skipProcessing: true, exif: true });
             if (res !== undefined && res !== null && res !== "") {
-                // Store the local URI directly without uploading
+                // Save locally with generated name and store the filename
                 const uri = res.uri;
-                setFlyerAttachment(uri);
+                const saved = await saveLocalFileFromUri(uri);
+                if (saved) await setFlyerAttachmentWithMapping(saved);
                 setShowCaptureModalFlyer(false);
                 setProggressDialogVisible(false);
             }
@@ -535,7 +666,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                 setSellingPrice("");
             }
             if (attachment.length > 0) {
-                setSingleFile(attachment[0].PRICING_ATTACHMENT);
+                await setSingleFileWithMapping(attachment[0].PRICING_ATTACHMENT);
             } else {
                 setSingleFile("");
             }
@@ -930,13 +1061,13 @@ export const NewVisitScreen = ({ route, navigation }) => {
             id: 'before', // acts as primary key, should be unique and non-empty string
             label: i18n.t("before"),
             value: 'before',
-            color: Constants.appColor,
+            color: "#111111",
         },
         {
             id: 'after',
             label: i18n.t("after"),
             value: 'after',
-            color: Constants.appColor,
+            color: "#111111",
             alignSelf: "flex-start"
         }
     ]), []);
@@ -970,10 +1101,10 @@ export const NewVisitScreen = ({ route, navigation }) => {
                 contentContainerStyle={{ paddingVertical: 10 }}
             >
                 <View style={{ backgroundColor: Constants.appColor, paddingHorizontal: 15, flexDirection: "row" }}>
-                    <TouchableOpacity onPress={handleAddPhoto} >
+                    <TouchableOpacity onPress={handleAddPhoto} disabled={outTime !== ""} >
                         <Ionicons name="camera" style={{ padding: 10 }} size={26} color={White} />
                     </TouchableOpacity>
-                    <TouchableOpacity onPress={() => { handleImageDelete(selectedPhoto) }} >
+                    <TouchableOpacity onPress={() => { handleImageDelete(selectedPhoto) }} disabled={outTime !== ""} >
                         <Ionicons name="trash-bin" style={{ padding: 10 }} size={26} color="red" />
                     </TouchableOpacity>
                 </View>
@@ -984,30 +1115,32 @@ export const NewVisitScreen = ({ route, navigation }) => {
                     numColumns={2}
                     renderItem={({ item }) => (
                         <TouchableOpacity onPress={() => handleImageSelect(item)} style={{ borderWidth: item == selectedPhoto ? 1 : 0, borderColor: "white" }} >
-                            <Image source={{ uri: item }} style={{ width: width / 2, height: height / 6 }} />
+                            <AttachmentImage uri={resolveAttachmentUri(item)} style={{ width: width / 2, height: height / 6 }} />
                         </TouchableOpacity>
                     )}
                 />
                 <Ionicons name="close" size={24} color="white" style={{ position: "absolute", top: 0, padding: 20, right: 0 }} onPress={async () => {
                     setShowCaptureModal(false);
                 }} />
-                <View style={{ backgroundColor: "white" }}>
-                    <Button mode="contained" style={{ padding: 10, backgroundColor: Constants.appColor }}
-                        onPress={async () => {
-                            console.log(photos);
-                            if (photos.length > 0) {
-                                if (imageType == "before") {
-                                    await Commons.setImagesBefore(photos.join("@@"), selectedTask.ID, selectedTask.DESC, selectedTask.TYPE, selectedCategory.ID);
-                                } else {
-                                    await Commons.setImagesAfter(photos.join("@@"), selectedTask.ID, selectedTask.DESC, selectedTask.TYPE, selectedCategory.ID);
+                {outTime === "" && (
+                    <View style={{ backgroundColor: "white" }}>
+                        <Button mode="contained" style={{ padding: 10, backgroundColor: Constants.appColor }}
+                            onPress={async () => {
+                                console.log(photos);
+                                if (photos.length > 0) {
+                                    if (imageType == "before") {
+                                        await Commons.setImagesBefore(photos.join("@@"), selectedTask.ID, selectedTask.DESC, selectedTask.TYPE, selectedCategory.ID);
+                                    } else {
+                                        await Commons.setImagesAfter(photos.join("@@"), selectedTask.ID, selectedTask.DESC, selectedTask.TYPE, selectedCategory.ID);
+                                    }
                                 }
-                            }
-                            setShowCaptureModal(false);
-                            setPhotos([]);
-                        }}>
-                        <Text style={styles.text}> {i18n.t("confirm")} </Text>
-                    </Button>
-                </View>
+                                setShowCaptureModal(false);
+                                setPhotos([]);
+                            }}>
+                            <Text style={styles.text}> {i18n.t("confirm")} </Text>
+                        </Button>
+                    </View>
+                )}
             </Modal >
         );
     }
@@ -1101,7 +1234,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                                 navigation.navigate("Main");
                             }}
                         >
-                            <Text>{i18n.t("cancel")}</Text>
+                            <Text style={styles.defaultText}>{i18n.t("cancel")}</Text>
                         </Button>
                         <Button
                             style={{ flex: 1 }}
@@ -1162,12 +1295,32 @@ export const NewVisitScreen = ({ route, navigation }) => {
                                 setPhotos([]);
                                 if (imgsBefore.length > 0) {
                                     imgsBefore = imgsBefore[0].IMAGES_BEFORE;
-                                    if (imageType == "before" && imgsBefore != undefined && imgsBefore != null) setPhotos(imgsBefore.split("@@"));
+                                    if (imageType == "before" && imgsBefore != undefined && imgsBefore != null) {
+                                        const arr = imgsBefore.split('@@');
+                                        setPhotos(arr);
+                                        // load any local mappings for preview
+                                        arr.forEach(async (name) => {
+                                            if (name && !name.startsWith('http') && !name.includes('/') && !name.includes('\\')) {
+                                                const mapped = await Commons.getLocalFileMapping(name);
+                                                if (mapped) setLocalAttachmentMap(prev => ({ ...prev, [name]: mapped }));
+                                            }
+                                        });
+                                    }
                                 }
 
                                 if (imgsAfter.length > 0) {
                                     imgsAfter = imgsAfter[0].IMAGES_AFTER;
-                                    if (imageType == "after" && imgsAfter != undefined && imgsAfter != null) setPhotos(imgsAfter.split("@@"));
+                                    if (imageType == "after" && imgsAfter != undefined && imgsAfter != null) {
+                                        const arr = imgsAfter.split('@@');
+                                        setPhotos(arr);
+                                        // load any local mappings for preview
+                                        arr.forEach(async (name) => {
+                                            if (name && !name.startsWith('http') && !name.includes('/') && !name.includes('\\')) {
+                                                const mapped = await Commons.getLocalFileMapping(name);
+                                                if (mapped) setLocalAttachmentMap(prev => ({ ...prev, [name]: mapped }));
+                                            }
+                                        });
+                                    }
                                 }
                                 setShowImageTypeModal(false);
                                 setShowCaptureModal(true);
@@ -1204,6 +1357,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                             value={newProdName}
                             onChangeText={setNewProdName}
                             style={{ flex: 0.5 }}
+                            editable={outTime === ""}
                         />
                         <TextInput
                             label={i18n.t("price")}
@@ -1211,17 +1365,19 @@ export const NewVisitScreen = ({ route, navigation }) => {
                             keyboardType="numeric"
                             onChangeText={setNewProdPrice}
                             style={{ flex: 0.5, marginLeft: 10 }}
+                            editable={outTime === ""}
                         />
                     </View>
                     <View style={{ marginTop: 20, flexDirection: "row-reverse" }}>
-
-                        <Button mode="contained" style={{ flex: 0.5 }}
-                            onPress={() => {
-                                addToCompList(newProdName, newProdPrice);
-                            }}>
-                            <Text style={styles.text}> {i18n.t("confirm")} </Text>
-                        </Button>
-                        <Button mode="contained" style={{ flex: 0.5, marginRight: 5 }} onPress={async () => {
+                        {outTime === "" && (
+                            <Button mode="contained" style={{ flex: 0.5 }}
+                                onPress={() => {
+                                    addToCompList(newProdName, newProdPrice);
+                                }}>
+                                <Text style={styles.text}> {i18n.t("confirm")} </Text>
+                            </Button>
+                        )}
+                        <Button mode="contained" style={{ flex: outTime === "" ? 0.5 : 1, marginRight: 5 }} onPress={async () => {
                             setShowAddToCompListModal(false);
                         }}>
                             <Text style={styles.text}>{i18n.t("back")}</Text>
@@ -1251,6 +1407,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                             mode="outlined"
                             style={{ borderColor: "rgb(1,135,134)" }}
                             onPress={showDatePicker}
+                            disabled={outTime !== ""}
                         >
                             {i18n.t("expDate")}
                         </Button>
@@ -1260,6 +1417,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                             justifyContent: "center",
                             alignItems: "center",
                             textAlign: "center",
+                            color: "#111111"
                         }}>{newProdExpDate}</Text>
                         <TextInput
                             label={i18n.t("qty")}
@@ -1269,17 +1427,19 @@ export const NewVisitScreen = ({ route, navigation }) => {
                             style={{ marginLeft: 10, marginTop: 20 }}
                             returnKeyType="done"
                             blurOnSubmit={true}
+                            editable={outTime === ""}
                         />
                     </View>
                     <View style={{ marginTop: 20, flexDirection: "row-reverse" }}>
-
-                        <Button mode="contained" style={{ flex: 0.5 }}
-                            onPress={() => {
-                                addToExpList(newProdExpDate, newProdExpQty);
-                            }}>
-                            <Text style={styles.text}> {i18n.t("confirm")} </Text>
-                        </Button>
-                        <Button mode="contained" style={{ flex: 0.5, marginRight: 5 }} onPress={async () => {
+                        {outTime === "" && (
+                            <Button mode="contained" style={{ flex: 0.5 }}
+                                onPress={() => {
+                                    addToExpList(newProdExpDate, newProdExpQty);
+                                }}>
+                                <Text style={styles.text}> {i18n.t("confirm")} </Text>
+                            </Button>
+                        )}
+                        <Button mode="contained" style={{ flex: outTime === "" ? 0.5 : 1, marginRight: 5 }} onPress={async () => {
                             setShowAddToExpListModal(false);
                         }}>
                             <Text style={styles.text}>{i18n.t("back")}</Text>
@@ -1312,6 +1472,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                             keyboardType="numeric"
                             onChangeText={setAllFaces}
                             style={{ flex: 0.5 }}
+                            editable={outTime === ""}
                         />
                         <TextInput
                             label={i18n.t("company")}
@@ -1319,19 +1480,22 @@ export const NewVisitScreen = ({ route, navigation }) => {
                             keyboardType="numeric"
                             onChangeText={setCompanyFaces}
                             style={{ flex: 0.5, marginLeft: 10 }}
+                            editable={outTime === ""}
                         />
                     </View>
                     {allFaces != "" && allFaces != 0 && (<Text style={[styles.text, { color: Constants.greenColor, alignSelf: "flex-end", marginTop: 20, marginBottom: 10 }]}>
                         {i18n.t("companyPer")} {Number((companyFaces / allFaces * 100).toFixed(2))} {"%"}
                     </Text>)}
-                    <Button mode="contained" style={{ marginTop: 20, marginHorizontal: 70, backgroundColor: Constants.appColor }}
-                        onPress={async () => {
-                            await Commons.setItemAllFaces(selectedItem.ID, allFaces, selectedItem.DESC, selectedCategory.ID, selectedTask.ID);
-                            await Commons.setItemCompanyFaces(selectedItem.ID, companyFaces, selectedItem.DESC, selectedCategory.ID, selectedTask.ID);
-                            setShowFacesModal(false);
-                        }}>
-                        <Text style={styles.text}> {i18n.t("confirm")} </Text>
-                    </Button>
+                    {outTime === "" && (
+                        <Button mode="contained" style={{ marginTop: 20, marginHorizontal: 70, backgroundColor: Constants.appColor }}
+                            onPress={async () => {
+                                await Commons.setItemAllFaces(selectedItem.ID, allFaces, selectedItem.DESC, selectedCategory.ID, selectedTask.ID);
+                                await Commons.setItemCompanyFaces(selectedItem.ID, companyFaces, selectedItem.DESC, selectedCategory.ID, selectedTask.ID);
+                                setShowFacesModal(false);
+                            }}>
+                            <Text style={styles.text}> {i18n.t("confirm")} </Text>
+                        </Button>
+                    )}
                 </View>
 
             </Modal >
@@ -1353,6 +1517,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                         style={{ backgroundColor: Constants.darkBlueColor }}
                         mode="contained"
                         onPress={() => setShowCaptureModalPricing(true)}
+                        disabled={outTime !== ""}
                     >
                         <View style={{ flexDirection: 'row' }}>
                             <Ionicons name="camera" size={24} color={White} />
@@ -1362,9 +1527,10 @@ export const NewVisitScreen = ({ route, navigation }) => {
                 </View>
                 {singleFile && (
                     <View style={{ marginTop: 20, alignItems: "center" }}>
-                        <Image
-                            source={{ uri: singleFile }}
-                            style={{ width: width * 0.8, height: height * 0.3, resizeMode: "contain" }}
+                        <AttachmentImage
+                            uri={resolveAttachmentUri(singleFile)}
+                            style={{ width: width * 0.8, height: height * 0.3 }}
+                            imageProps={{ resizeMode: 'contain' }}
                         />
                         <Button
                             mode="outlined"
@@ -1374,6 +1540,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                                     setSingleFile("");
                                 });
                             }}
+                            disabled={outTime !== ""}
                         >
                             <View style={{ flexDirection: 'row' }}>
                                 <Ionicons name="trash" size={20} color="red" />
@@ -1391,6 +1558,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                         style={{ marginHorizontal: "24%", textAlign: "center", marginBottom: "20%" }}
                         returnKeyType="done"
                         blurOnSubmit={true}
+                        editable={outTime === ""}
                     />
                     {/* <View>
                         <Button mode="contained" style={{ marginTop: 20, backgroundColor: Constants.darkBlueColor, marginBottom: 10 }} onPress={() => {
@@ -1420,12 +1588,12 @@ export const NewVisitScreen = ({ route, navigation }) => {
                                         }}
                                     >
                                         <View style={styles.taskItemView(curLang)}>
-                                            <Text>{i18n.t("product")}</Text>
-                                            <Text>{item.prod}</Text>
+                                            <Text style={styles.defaultText}>{i18n.t("product")}</Text>
+                                            <Text style={styles.defaultText}>{item.prod}</Text>
                                         </View>
                                         <View style={styles.taskItemView(curLang)}>
-                                            <Text>{i18n.t("price")}</Text>
-                                            <Text>{item.price}</Text>
+                                            <Text style={styles.defaultText}>{i18n.t("price")}</Text>
+                                            <Text style={styles.defaultText}>{item.price}</Text>
                                         </View>
                                         <TouchableOpacity style={{ position: "absolute", top: 0, right: 0 }} onPress={() => {
                                             Commons.confirmAlert(i18n.t("areYouSure"), "", () => {
@@ -1440,25 +1608,27 @@ export const NewVisitScreen = ({ route, navigation }) => {
                         />
                     </View> */}
                     <View style={{ flexDirection: "row-reverse" }}>
-                        <Button mode="contained" style={{ backgroundColor: Constants.appColor, flex: 0.5 }}
-                            onPress={async () => {
-                                await Commons.setItemSellingPrice(selectedItem.ID, sellingPrice, selectedItem.DESC, selectedCategory.ID, selectedTask.ID);
-                                await Commons.setPricingAttachment(selectedItem.ID, singleFile, selectedItem.DESC, selectedCategory.ID, selectedTask.ID);
-                                // let list = [];
-                                // compList.map((item) => {
-                                //     list.push(item.prod + "@@" + item.price);
-                                // })
-                                // list = list.join("$$");
-                                // await Commons.setCompProdList(selectedItem.ID, list, selectedItem.DESC, selectedCategory.ID, selectedTask.ID);
-                                // setInitialCompList([]);
-                                // setCompList([]);
-                                setSingleFile("");
-                                setShowPricingModal(false);
-                            }}
-                        >
-                            <Text style={styles.text}> {i18n.t("confirm")} </Text>
-                        </Button>
-                        <Button mode="contained" style={{ flex: 0.5, marginRight: 5 }} onPress={async () => {
+                        {outTime === "" && (
+                            <Button mode="contained" style={{ backgroundColor: Constants.appColor, flex: 0.5 }}
+                                onPress={async () => {
+                                    await Commons.setItemSellingPrice(selectedItem.ID, sellingPrice, selectedItem.DESC, selectedCategory.ID, selectedTask.ID);
+                                    await Commons.setPricingAttachment(selectedItem.ID, singleFile, selectedItem.DESC, selectedCategory.ID, selectedTask.ID);
+                                    // let list = [];
+                                    // compList.map((item) => {
+                                    //     list.push(item.prod + "@@" + item.price);
+                                    // })
+                                    // list = list.join("$$");
+                                    // await Commons.setCompProdList(selectedItem.ID, list, selectedItem.DESC, selectedCategory.ID, selectedTask.ID);
+                                    // setInitialCompList([]);
+                                    // setCompList([]);
+                                    setSingleFile("");
+                                    setShowPricingModal(false);
+                                }}
+                            >
+                                <Text style={styles.text}> {i18n.t("confirm")} </Text>
+                            </Button>
+                        )}
+                        <Button mode="contained" style={{ flex: outTime === "" ? 0.5 : 1, marginRight: 5 }} onPress={async () => {
                             setShowPricingModal(false);
                         }}>
                             <Text style={styles.text}>{i18n.t("back")}</Text>
@@ -1500,7 +1670,8 @@ export const NewVisitScreen = ({ route, navigation }) => {
                             setShowAddToExpListModal(true);
                             setNewProdExpDate("");
                             setNewProdExpQty("")
-                        }}>
+                        }}
+                            disabled={outTime !== ""}>
                             <View style={{ flexDirection: 'row' }}>
                                 <Ionicons name="add" size={24} color={White} />
                                 <Text style={styles.text}>  {i18n.t("addDate")} </Text>
@@ -1523,18 +1694,19 @@ export const NewVisitScreen = ({ route, navigation }) => {
                                         }}
                                     >
                                         <View style={styles.taskItemView(curLang)}>
-                                            <Text>{i18n.t("expDate")}</Text>
-                                            <Text>{item.date}</Text>
+                                            <Text style={styles.defaultText}>{i18n.t("expDate")}</Text>
+                                            <Text style={styles.defaultText}>{item.date}</Text>
                                         </View>
                                         <View style={styles.taskItemView(curLang)}>
-                                            <Text>{i18n.t("qty")}</Text>
-                                            <Text>{item.qty}</Text>
+                                            <Text style={styles.defaultText}>{i18n.t("qty")}</Text>
+                                            <Text style={styles.defaultText}>{item.qty}</Text>
                                         </View>
                                         <TouchableOpacity style={{ position: "absolute", top: 0, right: 0 }} onPress={() => {
                                             Commons.confirmAlert(i18n.t("areYouSure"), "", () => {
                                                 deleteFromExpList(selectedItem.ID + item.date);
                                             })
-                                        }}>
+                                        }}
+                                            disabled={outTime !== ""}>
                                             <Ionicons name="trash" size={18} color="white" style={{ color: "red", borderRadius: 0, padding: 5 }} />
                                         </TouchableOpacity>
                                     </View>
@@ -1544,22 +1716,24 @@ export const NewVisitScreen = ({ route, navigation }) => {
                     </View>
                     <View>
                         <View style={{ flexDirection: "row-reverse", marginTop: 20 }}>
-                            <Button mode="contained" style={{ flex: 0.5 }}
-                                onPress={async () => {
-                                    let list = [];
-                                    expList.map((item) => {
-                                        list.push(item.date + "@@" + item.qty);
-                                    })
-                                    list = list.join("$$");
-                                    await Commons.setExpiryList(selectedItem.ID, list, selectedItem.DESC, selectedCategory.ID, selectedTask.ID);
-                                    setInitialExpList([]);
-                                    setExpList([]);
-                                    setShowExpiryModal(false);
-                                }}
-                            >
-                                <Text style={styles.text}> {i18n.t("confirm")} </Text>
-                            </Button>
-                            <Button mode="contained" style={{ flex: 0.5, marginRight: 5 }} onPress={async () => {
+                            {outTime === "" && (
+                                <Button mode="contained" style={{ flex: 0.5 }}
+                                    onPress={async () => {
+                                        let list = [];
+                                        expList.map((item) => {
+                                            list.push(item.date + "@@" + item.qty);
+                                        })
+                                        list = list.join("$$");
+                                        await Commons.setExpiryList(selectedItem.ID, list, selectedItem.DESC, selectedCategory.ID, selectedTask.ID);
+                                        setInitialExpList([]);
+                                        setExpList([]);
+                                        setShowExpiryModal(false);
+                                    }}
+                                >
+                                    <Text style={styles.text}> {i18n.t("confirm")} </Text>
+                                </Button>
+                            )}
+                            <Button mode="contained" style={{ flex: outTime === "" ? 0.5 : 1, marginRight: 5 }} onPress={async () => {
                                 setShowExpiryModal(false);
                             }}>
                                 <Text style={styles.text}>{i18n.t("back")}</Text>
@@ -1606,7 +1780,8 @@ export const NewVisitScreen = ({ route, navigation }) => {
                     <Button mode="contained" style={{ backgroundColor: Constants.darkBlueColor }}
                         onPress={() => {
                             setShowCaptureModalFlyer(true);
-                        }}>
+                        }}
+                        disabled={outTime !== ""}>
                         <View style={{ flexDirection: 'row' }}>
                             <Ionicons name="camera" size={24} color={White} />
                             <Text style={styles.text}>  {i18n.t("takePicture")} </Text>
@@ -1615,9 +1790,10 @@ export const NewVisitScreen = ({ route, navigation }) => {
 
                     {flyerAttachment && (
                         <View style={{ marginTop: 20, alignItems: "center" }}>
-                            <Image
-                                source={{ uri: flyerAttachment }}
-                                style={{ width: width * 0.8, height: height * 0.4, resizeMode: "contain" }}
+                            <AttachmentImage
+                                uri={resolveAttachmentUri(flyerAttachment)}
+                                style={{ width: width * 0.8, height: height * 0.4 }}
+                                imageProps={{ resizeMode: 'contain' }}
                             />
                             <Button
                                 mode="outlined"
@@ -1627,6 +1803,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                                         setFlyerAttachment("");
                                     });
                                 }}
+                                disabled={outTime !== ""}
                             >
                                 <View style={{ flexDirection: 'row' }}>
                                     <Ionicons name="trash" size={20} color="red" />
@@ -1637,21 +1814,23 @@ export const NewVisitScreen = ({ route, navigation }) => {
                     )}
 
                     <View style={{ flexDirection: "row-reverse", marginTop: 20 }}>
-                        <Button mode="contained" style={{ backgroundColor: Constants.appColor, flex: 0.5 }}
-                            onPress={async () => {
-                                if (selectedTask.TYPE == "Flyer") {
-                                    await Commons.setFlyerAttachment(selectedCategory.ID, selectedTask.ID, flyerAttachment, selectedTask.DESC, selectedTask.TYPE);
-                                } else if (selectedTask.TYPE == "Offshelf") {
-                                    await Commons.setOffshelfAttachment(selectedCategory.ID, selectedTask.ID, flyerAttachment, selectedTask.DESC, selectedTask.TYPE);
-                                }
-                                await stopCategoryTimer();
-                                await stopTaskTimer();
-                                setShowFlyerModal(false);
-                            }}
-                        >
-                            <Text style={styles.text}> {i18n.t("confirm")} </Text>
-                        </Button>
-                        <Button mode="contained" style={{ flex: 0.5, marginRight: 5 }} onPress={async () => {
+                        {outTime === "" && (
+                            <Button mode="contained" style={{ backgroundColor: Constants.appColor, flex: 0.5 }}
+                                onPress={async () => {
+                                    if (selectedTask.TYPE == "Flyer") {
+                                        await Commons.setFlyerAttachment(selectedCategory.ID, selectedTask.ID, flyerAttachment, selectedTask.DESC, selectedTask.TYPE);
+                                    } else if (selectedTask.TYPE == "Offshelf") {
+                                        await Commons.setOffshelfAttachment(selectedCategory.ID, selectedTask.ID, flyerAttachment, selectedTask.DESC, selectedTask.TYPE);
+                                    }
+                                    await stopCategoryTimer();
+                                    await stopTaskTimer();
+                                    setShowFlyerModal(false);
+                                }}
+                            >
+                                <Text style={styles.text}> {i18n.t("confirm")} </Text>
+                            </Button>
+                        )}
+                        <Button mode="contained" style={{ flex: outTime === "" ? 0.5 : 1, marginRight: 5 }} onPress={async () => {
                             await stopCategoryTimer();
                             await stopTaskTimer();
                             setShowFlyerModal(false);
@@ -1782,18 +1961,18 @@ export const NewVisitScreen = ({ route, navigation }) => {
                 <Text style={{ color: "red", marginBottom: 15 }}>
                     {item.ID}
                 </Text>
-                <Text>{item.DESC}</Text>
+                <Text style={styles.defaultText}>{item.DESC}</Text>
                 {selectedTask.TYPE == "Item Availability" && (
                     <View style={{ padding: 20 }}>
                         <RadioGroup
                             radioButtons={radioButtonsAvl}
-                            onPress={async (val) => {
+                            onPress={outTime === "" ? async (val) => {
                                 if (val != "") {
                                     console.log(val);
                                     await Commons.setTaskItemAvl(item.ID, val, item.DESC, selectedTask.ID, selectedCategory.ID);
                                     updateTaskItemAvlList(item.ID, val);
                                 }
-                            }}
+                            } : () => { }}
                             selectedId={item.ITEM_AVAILABLE}
                             containerStyle={{
                                 alignItems: "flex-start",
@@ -1851,12 +2030,12 @@ export const NewVisitScreen = ({ route, navigation }) => {
                             )}
                         </Text>
                         <View style={styles.taskItemView(curLang)}>
-                            <Text>{" "}{i18n.t("type")}{" "}</Text>
-                            <Text>{item.TYPE}</Text>
+                            <Text style={styles.defaultText}>{" "}{i18n.t("type")}{" "}</Text>
+                            <Text style={styles.defaultText}>{item.TYPE}</Text>
                         </View>
                         <View style={styles.taskItemView(curLang)}>
-                            <Text>{" "}{i18n.t("desc")}{" "}</Text>
-                            <Text>{item.DESC}</Text>
+                            <Text style={styles.defaultText}>{" "}{i18n.t("desc")}{" "}</Text>
+                            <Text style={styles.defaultText}>{item.DESC}</Text>
                         </View>
                     </View>
                 </TouchableOpacity>
@@ -1905,7 +2084,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                 <Text style={{ color: "red", marginBottom: 15 }}>
                     {item.ID}
                 </Text>
-                <Text>{item.DESC}</Text>
+                <Text style={styles.defaultText}>{item.DESC}</Text>
                 {passwordOverrideMode && (
                     <Ionicons name="lock-closed" size={20} color="red" style={{ position: "absolute", top: 10, right: 10 }} />
                 )}
@@ -1974,11 +2153,6 @@ export const NewVisitScreen = ({ route, navigation }) => {
             await checkDistance(selectedCustomerLocation, allowedRadius);
         }
 
-        // Save locally with "posted" status and set end time
-        setProgressDialogMessage(i18n.t("endingVisit"));
-        setOutTime(time);
-        await saveVisit(inTime, time, "posted");
-
         // Must post to API - required for ending visit
         try {
             const curVisID = await Commons.getFromAS("curVisitID");
@@ -2002,21 +2176,29 @@ export const NewVisitScreen = ({ route, navigation }) => {
             );
 
             if (!result || !result.success) {
+                // Server operation failed - save as pending without end time
+                setProgressDialogMessage(i18n.t("savingAsPending"));
+                await saveVisit(inTime, "", "pending");
+                setProggressDialogVisible(false);
                 Commons.okAlert(i18n.t("networkErrorVisitNotEnded"));
-                // Revert outTime since we couldn't post
-                setOutTime("");
                 return;
             }
+
+            // Server operation succeeded - save as posted with end time
+            setProgressDialogMessage(i18n.t("endingVisit"));
+            setOutTime(time);
+            await saveVisit(inTime, time, "posted");
 
             setProggressDialogVisible(false);
             Commons.okAlert(i18n.t("visitEnded"));
             // Optionally navigate away or disable further editing
         } catch (error) {
+            // Server operation failed - save as pending without end time
+            setProgressDialogMessage(i18n.t("savingAsPending"));
+            await saveVisit(inTime, "", "pending");
             setProggressDialogVisible(false);
             console.error("Failed to post visit:", error);
             Commons.okAlert(i18n.t("networkErrorVisitNotEnded"));
-            // Revert outTime since we couldn't post
-            setOutTime("");
         }
     }
 
@@ -2137,7 +2319,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                             try {
                                 const cats = await ServerOperations.getCategories();
                                 await Commons.loadCategories(cats);
-                                const customers = await ServerOperations.getCustomers();
+                                const customers = await ServerOperations.getCustomers(user);
                                 await Commons.loadCustomers(customers);
                                 const visitPasses = await ServerOperations.getVisitPasswords();
                                 await Commons.loadVisitPasswords(visitPasses);
@@ -2163,7 +2345,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                 </Button>)
             }
             {
-                (outTime == "" && inTime != "") && (
+                ((outTime == "" && inTime != "") || route.params.visitID === '7-12') && (
                     <View style={{ flexDirection: "row", marginVertical: 5, marginBottom: 20 }}>
                         {!passwordOverrideMode && (
                             <Button
@@ -2257,12 +2439,16 @@ const styles = StyleSheet.create({
         alignSelf: "center",
         textTransform: "uppercase",
     },
+    defaultText: {
+        color: "#111111",
+    },
     searchBox: {
         borderColor: "#ccc",
         borderWidth: StyleSheet.hairlineWidth,
         borderRadius: 8,
         textAlign: "center",
-        backgroundColor: "#ececec"
+        backgroundColor: "#ececec",
+        color: "#111111"
     },
     card: {
         alignItems: "flex-start",

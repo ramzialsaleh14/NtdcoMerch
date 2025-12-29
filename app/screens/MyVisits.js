@@ -172,7 +172,7 @@ export const MyVisitsScreen = ({ navigation }) => {
                         borderColor: Color.GREY[500],
                     }}
                 >
-                    <View style={{ paddingTop: 25 }}>
+                    {/* <View style={{ paddingTop: 25 }}>
                         <Ionicons name="open-outline" size={18} color="white" style={{ backgroundColor: Constants.appColor, borderRadius: 0, padding: 8, position: "absolute", bottom: 5 }} />
                         {item.STATUS && item.STATUS.toLowerCase().trim() === "pending" && (
                             <TouchableOpacity style={{ position: "absolute", bottom: 5, right: 0 }} onPress={() => {
@@ -183,37 +183,53 @@ export const MyVisitsScreen = ({ navigation }) => {
                                 <Ionicons name="trash" size={18} color="white" style={{ backgroundColor: "red", borderRadius: 0, padding: 8 }} />
                             </TouchableOpacity>
                         )}
-                    </View>
+                    </View> */}
                     <Text style={{ marginRight: 20, color: "red", alignSelf: "center", marginBottom: 15 }}>
                         {item.ID}
                     </Text>
                     <View style={styles.taskItemView(curLang)}>
-                        <Text>{" "}{i18n.t("user")}{" "}</Text>
-                        <Text>{item.USER}</Text>
+                        <Text style={styles.defaultText}>{" "}{i18n.t("user")}{" "}</Text>
+                        <Text style={styles.defaultText}>{item.USER}</Text>
                     </View>
                     <View style={styles.taskItemView(curLang)}>
-                        <Text>{" "}{i18n.t("customer")}{" "}</Text>
-                        <Text>{item.CUSTOMER}</Text>
+                        <Text style={styles.defaultText}>{" "}{i18n.t("customer")}{" "}</Text>
+                        <Text style={styles.defaultText}>{item.CUSTOMER}</Text>
                     </View>
                     <View style={[styles.taskItemView(curLang), { marginBottom: 15 }]}>
-                        <Text>{"  "}</Text>
-                        <Text>{item.NAME}</Text>
+                        <Text style={styles.defaultText}>{"  "}</Text>
+                        <Text style={styles.defaultText}>{item.NAME}</Text>
                     </View>
                     <View style={styles.taskItemView(curLang)}>
-                        <Text>{" "}{i18n.t("inTime")}{" "}</Text>
-                        <Text>{item.IN_TIME}</Text>
+                        <Text style={styles.defaultText}>{" "}{i18n.t("inTime")}{" "}</Text>
+                        <Text style={styles.defaultText}>{item.IN_TIME}</Text>
                     </View>
                     <View style={styles.taskItemView(curLang)}>
-                        <Text>{" "}{i18n.t("outTime")}{" "}</Text>
-                        <Text>{item.OUT_TIME}</Text>
+                        <Text style={styles.defaultText}>{" "}{i18n.t("outTime")}{" "}</Text>
+                        <Text style={styles.defaultText}>{item.OUT_TIME}</Text>
                     </View>
                     <View style={styles.taskItemView(curLang)}>
-                        <Text>{" "}{i18n.t("notes")}{" "}</Text>
-                        <Text>{item.NOTES}</Text>
+                        <Text style={styles.defaultText}>{" "}{i18n.t("notes")}{" "}</Text>
+                        <Text style={styles.defaultText}>{item.NOTES}</Text>
                     </View>
                     <View style={styles.taskItemView(curLang)}>
-                        <Text>{" "}{i18n.t("status")}{" "}</Text>
-                        <Text>{item.STATUS}</Text>
+                        <Text style={styles.defaultText}>{" "}{i18n.t("status")}{" "}</Text>
+                        {/* Show translated label for Arabic and color for specific statuses */}
+                        {(() => {
+                            const raw = (item.STATUS || "").toString();
+                            const lower = raw.toLowerCase().trim();
+                            let color = "#111111"; // default
+                            let label = raw;
+                            if (lower === "pending") {
+                                color = "#FFC107"; // yellow / amber
+                                label = curLang === "ar" ? "معلقة" : raw;
+                            } else if (lower === "posted") {
+                                color = "#ff3333"; // red
+                                label = curLang === "ar" ? "مرحلة" : raw;
+                            }
+                            return (
+                                <Text style={[styles.defaultText, { color }]}>{label}</Text>
+                            );
+                        })()}
                     </View>
                 </View>
             </TouchableOpacity >
@@ -255,7 +271,7 @@ export const MyVisitsScreen = ({ navigation }) => {
             {/* Date Filters */}
             <View style={{ flexDirection: 'row', margin: 10, gap: 10, alignItems: 'center' }}>
                 <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 12, marginBottom: 5, fontWeight: 'bold' }}>{i18n.t("from")}</Text>
+                    <Text style={{ fontSize: 12, marginBottom: 5, fontWeight: 'bold', color: "#111111" }}>{i18n.t("from")}</Text>
                     <TouchableOpacity
                         onPress={() => setShowFromDatePicker(true)}
                         style={{
@@ -266,12 +282,12 @@ export const MyVisitsScreen = ({ navigation }) => {
                             backgroundColor: 'white'
                         }}
                     >
-                        <Text>{moment(fromDate).format("DD/MM/YYYY")}</Text>
+                        <Text style={styles.defaultText}>{moment(fromDate).format("DD/MM/YYYY")}</Text>
                     </TouchableOpacity>
                 </View>
 
                 <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 12, marginBottom: 5, fontWeight: 'bold' }}>{i18n.t("to")}</Text>
+                    <Text style={{ fontSize: 12, marginBottom: 5, fontWeight: 'bold', color: "#111111" }}>{i18n.t("to")}</Text>
                     <TouchableOpacity
                         onPress={() => setShowToDatePicker(true)}
                         style={{
@@ -282,7 +298,7 @@ export const MyVisitsScreen = ({ navigation }) => {
                             backgroundColor: 'white'
                         }}
                     >
-                        <Text>{moment(toDate).format("DD/MM/YYYY")}</Text>
+                        <Text style={styles.defaultText}>{moment(toDate).format("DD/MM/YYYY")}</Text>
                     </TouchableOpacity>
                 </View>
             </View>
@@ -309,7 +325,7 @@ export const MyVisitsScreen = ({ navigation }) => {
                 <TextInput
                     placeholder={i18n.t("search")}
                     clearButtonMode="always"
-                    style={{ flex: 1 }}
+                    style={[{ flex: 1 }, styles.searchBox]}
                     value={searchText}
                     onChangeText={(text) => {
                         setSearchText(text);
@@ -317,7 +333,7 @@ export const MyVisitsScreen = ({ navigation }) => {
                         setFilteredVisitsList(list);
                     }}
                 />
-                <Button
+                {/* <Button
                     mode="contained"
                     icon="cloud-download"
                     loading={syncing}
@@ -344,7 +360,7 @@ export const MyVisitsScreen = ({ navigation }) => {
                     }}
                 >
                     {i18n.t("sync")}
-                </Button>
+                </Button> */}
             </View>
             <FlatList
                 keyExtractor={(item) => item.ID}
@@ -416,5 +432,15 @@ const styles = StyleSheet.create({
         fontWeight: "bold",
         alignSelf: "center",
         textTransform: "uppercase",
+    },
+    defaultText: {
+        color: "#111111",
+    },
+    searchBox: {
+        borderColor: "#ccc",
+        borderWidth: StyleSheet.hairlineWidth,
+        borderRadius: 8,
+        padding: 8,
+        color: "#111111",
     },
 });
